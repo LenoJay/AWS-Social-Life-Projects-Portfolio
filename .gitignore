@@ -1,0 +1,10 @@
+node_modules/
+npm-debug.log*
+.vscode/
+amplify/
+aws-exports.js
+amplifyconfiguration.json
+build/
+dist/
+.DS_Store
+Thumbs.db
