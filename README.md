@@ -1,3 +1,3 @@
 # AWS Social Life Projects
 
-A collection of AWS projects focused on social life—designed for sharing updates with friends and family. Built to demonstrate cloud expertise for recruiters.
+A collection of AWS projects showcasing scalable architecture and full-stack cloud development. Centered on real-world social life—sharing updates, staying connected, and promoting wellbeing. Designed to demonstrate hands-on AWS expertise and practical app-building skills to recruiters.
