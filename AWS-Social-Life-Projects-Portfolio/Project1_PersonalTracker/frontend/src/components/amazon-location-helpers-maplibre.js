@@ -1,12 +1,13 @@
 import { LocationClient, GetMapGlyphsCommand, GetMapSpritesCommand, GetMapStyleDescriptorCommand, GetMapTileCommand } from "@aws-sdk/client-location";
 import { Amplify } from "aws-amplify";
-import awsExports from "./aws-exports";
+import awsExports from "../aws-exports";
 
 Amplify.configure(awsExports);
 
+import { Auth } from "aws-amplify";
 const credentialsProvider = () => Auth.currentCredentials();
 const region = awsExports.aws_project_region;
-const mapName = awsExports.geo.default;
+const mapName = awsExports.geo.default;cd AWS-Social-Life-Projects-Portfolio/Project1_PersonalTracker/frontendcd AWS-Social-Life-Projects-Portfolio/Project1_PersonalTracker/frontend
 
 const client = new LocationClient({
   region,
