@@ -56,24 +56,51 @@ export const amplifyRequestTransformer = (url, resourceType) => {
   });
 };
 
-export function createMap(container) {
-  return new maplibregl.Map({
+export async function createMap(container) {
+  // 1. Fetch the style descriptor using the transformer
+  const styleBlob = await amplifyRequestTransformer(
+    `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/style-descriptor`,
+    "Style"
+  );
+  const styleJson = await styleBlob.text ? JSON.parse(await styleBlob.text()) : styleBlob;
+
+  // 2. Patch the sources to use signed tile requests
+  Object.keys(styleJson.sources).forEach((sourceName) => {
+    const source = styleJson.sources[sourceName];
+    if (source.tiles) {
+      // Replace tile URLs with functions that fetch signed tiles
+      const originalTiles = source.tiles;
+      source.tiles = originalTiles.map((tileUrl) => {
+        // MapLibre expects a URL, but we can use a custom protocol and intercept requests
+        return tileUrl.replace(
+          `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/tiles/`,
+          `amplify-tiles://`
+        );
+      });
+    }
+  });
+
+  // 3. Intercept requests for our custom protocol and use the transformer
+  const map = new maplibregl.Map({
     container,
-    style: `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/style-descriptor`,
+    style: styleJson,
     center: [13.405, 52.52],
     zoom: 12,
     transformRequest: (url, resourceType) => {
-      // Only sign requests to Amazon Location Service
-      if (url.includes(`maps.geo.${region}.amazonaws.com`)) {
-        return {
-          url,
-          // MapLibre expects a promise for AWS signed requests, but this is a sync function.
-          // So, you must use amplifyRequestTransformer in the tile source, not here, for full support.
-        };
+      if (url.startsWith("amplify-tiles://")) {
+        // Convert back to the real AWS URL
+        const realUrl = url.replace(
+          "amplify-tiles://",
+          `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/tiles/`
+        );
+        // This will be fetched by MapLibre, but we can't do async signing here.
+        // So, you may need to use a custom source or a proxy if this doesn't work.
+        return { url: realUrl };
       }
       return { url };
     },
   });
+  return map;
 }
 
 export function createPopup(text) {

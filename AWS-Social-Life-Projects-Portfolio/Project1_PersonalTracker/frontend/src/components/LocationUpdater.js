@@ -1,13 +1,15 @@
 import { useEffect } from "react";
-import { Auth } from '@aws-amplify/auth'; // ✅ correct
+import { fetchAuthSession } from '@aws-amplify/auth';
 import { LocationClient, BatchUpdateDevicePositionCommand } from "@aws-sdk/client-location";
 
 function LocationUpdater() {
   useEffect(() => {
     const updateLocation = async () => {
       try {
-        const credentials = await Auth.currentCredentials();
-        const identityId = credentials.identityId;
+
+        const session = await fetchAuthSession();
+        const credentials = session.credentials;
+        const identityId = session.identityId;
 
         const client = new LocationClient({
           region: "eu-central-1", // ✅ your region

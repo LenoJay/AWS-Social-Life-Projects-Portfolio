@@ -13,17 +13,21 @@ function MapComponent() {
   useEffect(() => {
     if (mapRef.current) return;
 
-    const map = createMap(mapContainer.current);
-    mapRef.current = map;
+    const setupMap = async () => {
+      const map = await createMap(mapContainer.current);
+      mapRef.current = map;
 
-    // Simulated device location
-    const deviceLocation = {
-      lat: 52.52,
-      lng: 13.405,
+      // Simulated device location
+      const deviceLocation = {
+        lat: 52.52,
+        lng: 13.405,
+      };
+
+      const popup = createPopup("Device Location");
+      updateMapLocation(map, deviceLocation, popup);
     };
 
-    const popup = createPopup("Device Location");
-    updateMapLocation(map, deviceLocation, popup);
+    setupMap();
   }, []);
 
   return (
