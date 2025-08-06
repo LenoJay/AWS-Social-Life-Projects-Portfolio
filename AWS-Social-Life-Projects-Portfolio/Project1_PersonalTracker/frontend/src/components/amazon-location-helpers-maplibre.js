@@ -7,7 +7,7 @@ Amplify.configure(awsExports);
 import { Auth } from "aws-amplify";
 const credentialsProvider = () => Auth.currentCredentials();
 const region = awsExports.aws_project_region;
-const mapName = awsExports.geo.default;cd AWS-Social-Life-Projects-Portfolio/Project1_PersonalTracker/frontendcd AWS-Social-Life-Projects-Portfolio/Project1_PersonalTracker/frontend
+const mapName = awsExports.geo.default;
 
 const client = new LocationClient({
   region,
