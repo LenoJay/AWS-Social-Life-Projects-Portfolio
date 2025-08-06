@@ -9,9 +9,11 @@ Amplify.configure(awsExports);
 
 const credentialsProvider = async () => {
   const session = await fetchAuthSession();
-  // For Amplify v5+, credentials are under session.credentials
   const creds = session.credentials;
-  // Return in the format expected by AWS SDK v3
+  if (!creds || !creds.accessKeyId || !creds.secretAccessKey) {
+    console.error("[AWS] No valid credentials found in fetchAuthSession()! Session:", session);
+    throw new Error("AWS credentials are missing. Make sure the user is signed in and Amplify is configured correctly.");
+  }
   return {
     accessKeyId: creds.accessKeyId,
     secretAccessKey: creds.secretAccessKey,
