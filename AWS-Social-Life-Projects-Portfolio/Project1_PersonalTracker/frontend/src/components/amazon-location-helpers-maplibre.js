@@ -8,8 +8,16 @@ import maplibregl from "maplibre-gl";
 Amplify.configure(awsExports);
 
 const credentialsProvider = async () => {
-  const { credentials } = await fetchAuthSession();
-  return credentials;
+  const session = await fetchAuthSession();
+  // For Amplify v5+, credentials are under session.credentials
+  const creds = session.credentials;
+  // Return in the format expected by AWS SDK v3
+  return {
+    accessKeyId: creds.accessKeyId,
+    secretAccessKey: creds.secretAccessKey,
+    sessionToken: creds.sessionToken,
+    expiration: creds.expiration,
+  };
 };
 const region = awsExports.aws_project_region;
 const mapName = awsExports.geo.amazon_location_service.default;
@@ -64,41 +72,66 @@ export async function createMap(container) {
   );
   const styleJson = await styleBlob.text ? JSON.parse(await styleBlob.text()) : styleBlob;
 
-  // 2. Patch the sources to use signed tile requests
-  Object.keys(styleJson.sources).forEach((sourceName) => {
-    const source = styleJson.sources[sourceName];
-    if (source.tiles) {
-      // Replace tile URLs with functions that fetch signed tiles
-      const originalTiles = source.tiles;
-      source.tiles = originalTiles.map((tileUrl) => {
-        // MapLibre expects a URL, but we can use a custom protocol and intercept requests
-        return tileUrl.replace(
-          `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/tiles/`,
-          `amplify-tiles://`
-        );
-      });
+  // 2. Remove the raster tile source from the style (we'll add it manually)
+  let rasterSourceName = null;
+  for (const [sourceName, source] of Object.entries(styleJson.sources)) {
+    if (source.type === "raster" && source.tiles && source.tiles[0].includes("tiles")) {
+      rasterSourceName = sourceName;
+      delete styleJson.sources[sourceName];
+      break;
     }
-  });
+  }
 
-  // 3. Intercept requests for our custom protocol and use the transformer
+  // 3. Create the map with the modified style
   const map = new maplibregl.Map({
     container,
     style: styleJson,
     center: [13.405, 52.52],
     zoom: 12,
-    transformRequest: (url, resourceType) => {
-      if (url.startsWith("amplify-tiles://")) {
-        // Convert back to the real AWS URL
-        const realUrl = url.replace(
-          "amplify-tiles://",
-          `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/tiles/`
-        );
-        // This will be fetched by MapLibre, but we can't do async signing here.
-        // So, you may need to use a custom source or a proxy if this doesn't work.
-        return { url: realUrl };
+  });
+
+  // 4. Add the raster tile source with a custom tile loader
+  map.on("load", () => {
+    if (!rasterSourceName) return;
+    map.addSource(rasterSourceName, {
+      type: "raster",
+      tiles: [
+        // This is a dummy URL, we will override tile loading below
+        `https://dummy/{z}/{x}/{y}`
+      ],
+      tileSize: 256,
+    });
+
+    // Override the tile loading
+    map.style.sourceCaches[rasterSourceName]._tileCache.clear();
+    map.style.sourceCaches[rasterSourceName].loadTile = async function(tile, callback) {
+      const z = tile.tileID.z;
+      const x = tile.tileID.x;
+      const y = tile.tileID.y;
+      const url = `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/tiles/${z}/${x}/${y}`;
+      try {
+        const blob = await amplifyRequestTransformer(url, "Tile");
+        const objectUrl = URL.createObjectURL(blob);
+        const image = new window.Image();
+        image.crossOrigin = "anonymous";
+        image.onload = function() {
+          URL.revokeObjectURL(objectUrl);
+          callback(null, image);
+        };
+        image.onerror = function(e) {
+          callback(e, null);
+        };
+        image.src = objectUrl;
+      } catch (e) {
+        callback(e, null);
       }
-      return { url };
-    },
+    };
+    // Add the raster layer back
+    map.addLayer({
+      id: rasterSourceName,
+      type: "raster",
+      source: rasterSourceName,
+    });
   });
   return map;
 }

@@ -13,7 +13,12 @@ function LocationUpdater() {
 
         const client = new LocationClient({
           region: "eu-central-1", // ✅ your region
-          credentials,
+          credentials: {
+            accessKeyId: credentials.accessKeyId,
+            secretAccessKey: credentials.secretAccessKey,
+            sessionToken: credentials.sessionToken,
+            expiration: credentials.expiration,
+          },
         });
 
         if (!navigator.geolocation) {
