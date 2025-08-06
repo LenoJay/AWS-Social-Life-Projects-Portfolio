@@ -4,7 +4,7 @@ import awsExports from "../aws-exports";
 
 Amplify.configure(awsExports);
 
-import { Auth } from "aws-amplify";
+import { Auth } from "@aws-amplify/auth";
 const credentialsProvider = () => Auth.currentCredentials();
 const region = awsExports.aws_project_region;
 const mapName = awsExports.geo.default;
