@@ -49,3 +49,26 @@ export const amplifyRequestTransformer = (url, resourceType) => {
     }
   });
 };
+
+// MapLibre helpers
+import maplibregl from "maplibre-gl";
+
+export function createMap(container) {
+  return new maplibregl.Map({
+    container,
+    style: `https://maps.geo.${region}.amazonaws.com/maps/v1/maps/${mapName}/style-descriptor`,
+    center: [13.405, 52.52],
+    zoom: 12,
+  });
+}
+
+export function createPopup(text) {
+  return new maplibregl.Popup().setText(text);
+}
+
+export function updateMapLocation(map, location, popup) {
+  const marker = new maplibregl.Marker()
+    .setLngLat([location.lng, location.lat])
+    .setPopup(popup)
+    .addTo(map);
+}
