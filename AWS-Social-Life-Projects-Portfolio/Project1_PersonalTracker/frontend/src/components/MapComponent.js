@@ -1,13 +1,12 @@
 import React, { useEffect, useRef } from "react";
-import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
 import { Amplify } from "aws-amplify";
 import awsExports from "../aws-exports";
-import { withIdentityPool } from "@aws/amazon-location-utilities-auth-helper";
+import { createMap } from "maplibre-gl-js-amplify"; // ✅ does the auth/signing for Amazon Location
+import "maplibre-gl/dist/maplibre-gl.css";
 
 Amplify.configure(awsExports);
 
-function MapComponent() {
+export default function MapComponent() {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
 
@@ -16,68 +15,40 @@ function MapComponent() {
 
     async function init() {
       try {
-        // Log the whole config so we can verify exact keys
-        console.log("[Map] awsExports:", awsExports);
-
-        // Be robust to different key names
-        const region =
-          awsExports.aws_project_region ||
-          awsExports.aws_cognito_region ||
-          awsExports.region;
-
-        const identityPoolId =
-          awsExports.cognito_identity_pool_id ||
-          awsExports.aws_cognito_identity_pool_id ||
-          awsExports.identityPoolId;
-
-        const geoCfg =
-          awsExports?.geo?.amazon_location_service ||
-          awsExports?.amazon_location_service ||
-          {};
-
-        const mapRegion = geoCfg.region || region; // map service region
+        // Use the exact keys from your aws-exports.js
+        const region = awsExports.aws_project_region; // "eu-central-1"
+        const identityPoolId = awsExports.aws_cognito_identity_pool_id; // "eu-central-1:xxxx-...."
+        const mapRegion =
+          awsExports.geo?.amazon_location_service?.region || region; // "eu-central-1"
         const mapName =
-          geoCfg?.maps?.default ||
-          geoCfg?.defaultMap ||
-          awsExports?.maps?.default;
+          awsExports.geo?.amazon_location_service?.maps?.default; // "PersonalTrackerMap-dev"
 
-        console.log("[Map] Resolved config:", {
-          region,
-          mapRegion,
-          identityPoolId,
-          mapName,
-        });
-
-        if (!region || !mapRegion || !identityPoolId || !mapName) {
-          console.error(
-            "[Map] Missing config. One of region/mapRegion/identityPoolId/mapName is undefined."
-          );
+        if (!region || !identityPoolId || !mapRegion || !mapName) {
+          console.error("[Map] Missing config:", {
+            region,
+            identityPoolId,
+            mapRegion,
+            mapName,
+          });
           return;
         }
 
-        const authHelper = await withIdentityPool({
-          identityPoolId,
-          region, // identity (Cognito) region
-        });
-
-        if (!isMounted || !mapContainer.current) return;
-
-        const styleUrl = `https://maps.geo.${mapRegion}.amazonaws.com/maps/v0/maps/${encodeURIComponent(
-          mapName
-        )}/style-descriptor`;
-
-        console.log("[Map] Style URL:", styleUrl);
-
-        const map = new maplibregl.Map({
+        // createMap returns a configured MapLibre-gl map with SigV4 signing wired up
+        const map = await createMap({
           container: mapContainer.current,
-          style: styleUrl,
           center: [0, 0],
           zoom: 2,
-          transformRequest: authHelper.transformRequest,
+          region: mapRegion,         // where the map resource lives
+          identityPoolId,            // for auth/signed requests
+          mapName,                   // "PersonalTrackerMap-dev"
         });
 
-        mapRef.current = map;
+        if (!isMounted) {
+          map?.remove();
+          return;
+        }
 
+        mapRef.current = map;
         map.on("load", () => console.log("[Map] load event fired"));
         map.on("error", (e) => console.error("[Map] map error", e?.error ?? e));
       } catch (e) {
@@ -103,5 +74,3 @@ function MapComponent() {
     />
   );
 }
-
-export default MapComponent;
