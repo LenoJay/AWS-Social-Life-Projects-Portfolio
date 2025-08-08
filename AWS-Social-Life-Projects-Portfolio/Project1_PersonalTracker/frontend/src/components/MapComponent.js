@@ -16,35 +16,57 @@ function MapComponent() {
 
     async function init() {
       try {
-        const region = awsExports.aws_project_region;
-        const identityPoolId = awsExports.cognito_identity_pool_id; // NOTE: exact key in your aws-exports.js
+        // Log the whole config so we can verify exact keys
+        console.log("[Map] awsExports:", awsExports);
+
+        // Be robust to different key names
+        const region =
+          awsExports.aws_project_region ||
+          awsExports.aws_cognito_region ||
+          awsExports.region;
+
+        const identityPoolId =
+          awsExports.cognito_identity_pool_id ||
+          awsExports.aws_cognito_identity_pool_id ||
+          awsExports.identityPoolId;
+
+        const geoCfg =
+          awsExports?.geo?.amazon_location_service ||
+          awsExports?.amazon_location_service ||
+          {};
+
+        const mapRegion = geoCfg.region || region; // map service region
         const mapName =
-          awsExports?.geo?.amazon_location_service?.maps?.default;
+          geoCfg?.maps?.default ||
+          geoCfg?.defaultMap ||
+          awsExports?.maps?.default;
 
-        console.log("[Map] Config", { region, identityPoolId, mapName });
+        console.log("[Map] Resolved config:", {
+          region,
+          mapRegion,
+          identityPoolId,
+          mapName,
+        });
 
-        if (!region || !identityPoolId || !mapName) {
+        if (!region || !mapRegion || !identityPoolId || !mapName) {
           console.error(
-            "[Map] Missing config. Check aws-exports.js values above are not undefined."
+            "[Map] Missing config. One of region/mapRegion/identityPoolId/mapName is undefined."
           );
           return;
         }
 
-        // Create the signing helper (this MUST succeed for map tiles to load)
         const authHelper = await withIdentityPool({
           identityPoolId,
-          region,
+          region, // identity (Cognito) region
         });
-
-        console.log("[Map] Auth helper ready");
 
         if (!isMounted || !mapContainer.current) return;
 
-        const styleUrl = `https://maps.geo.${region}.amazonaws.com/maps/v0/maps/${encodeURIComponent(
+        const styleUrl = `https://maps.geo.${mapRegion}.amazonaws.com/maps/v0/maps/${encodeURIComponent(
           mapName
         )}/style-descriptor`;
 
-        console.log("[Map] Style URL", styleUrl);
+        console.log("[Map] Style URL:", styleUrl);
 
         const map = new maplibregl.Map({
           container: mapContainer.current,
@@ -56,27 +78,8 @@ function MapComponent() {
 
         mapRef.current = map;
 
-        map.on("load", () => {
-          console.log("[Map] load event fired");
-        });
-
-        map.on("error", (e) => {
-          console.error("[Map] map error", e && e.error ? e.error : e);
-        });
-
-        // Optional: center on current position
-        if ("geolocation" in navigator) {
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              const { latitude, longitude } = pos.coords;
-              console.log("[Map] Geolocation", { latitude, longitude });
-              map.jumpTo({ center: [longitude, latitude], zoom: 12 });
-              new maplibregl.Marker().setLngLat([longitude, latitude]).addTo(map);
-            },
-            (err) => console.warn("[Map] Geolocation error", err),
-            { enableHighAccuracy: true }
-          );
-        }
+        map.on("load", () => console.log("[Map] load event fired"));
+        map.on("error", (e) => console.error("[Map] map error", e?.error ?? e));
       } catch (e) {
         console.error("[Map] init exception", e);
       }
