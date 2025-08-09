@@ -1,123 +1,150 @@
 // src/components/LocationUpdater.js
-import { useEffect } from "react";
-import { fetchAuthSession } from "@aws-amplify/auth";
-import {
-  LocationClient,
-  BatchUpdateDevicePositionCommand,
-} from "@aws-sdk/client-location";
-import awsExports from "../aws-exports";
+// Real-time browser geolocation -> MapLibre layers (point + accuracy circle)
 
-// ✅ Change this to your actual Amazon Location tracker name
-const TRACKER_NAME = "PersonalTracker";
+let watchId = null;
 
-// How often to send updates (ms)
-const UPDATE_INTERVAL_MS = 15_000; // 15s is usually fine for testing
+const POS_SOURCE_ID = "me-point-src";
+const POS_LAYER_ID = "me-point-layer";
 
-export default function LocationUpdater() {
-  useEffect(() => {
-    let isMounted = true;
-    let timerId;
+const ACC_SOURCE_ID = "me-accuracy-src";
+const ACC_LAYER_ID = "me-accuracy-layer";
 
-    const start = async () => {
-      try {
-        // Get Cognito identity + temporary AWS credentials from Amplify
-        const session = await fetchAuthSession();
-        const { credentials, identityId } = session;
+// Build a (very light) accuracy circle polygon from a center and radius (meters)
+function circlePolygon([lng, lat], radiusMeters = 30, steps = 64) {
+  const coords = [];
+  const earth = 6378137; // meters
+  const d = radiusMeters / earth;
 
-        if (!credentials || !identityId) {
-          console.warn(
-            "[LocationUpdater] Missing credentials/identity. Are you signed in?"
-          );
-          return;
-        }
+  const rad = (deg) => (deg * Math.PI) / 180;
+  const deg = (radVal) => (radVal * 180) / Math.PI;
 
-        // Use the region from your aws-exports.js so everything stays in sync
-        const region =
-          awsExports.aws_project_region ||
-          awsExports.aws_cognito_region ||
-          awsExports.region;
+  const latRad = rad(lat);
+  const lngRad = rad(lng);
 
-        if (!region) {
-          console.error(
-            "[LocationUpdater] Region not found in aws-exports.js. Aborting."
-          );
-          return;
-        }
+  for (let i = 0; i <= steps; i++) {
+    const brng = (i * 2 * Math.PI) / steps;
+    const lat2 = Math.asin(
+      Math.sin(latRad) * Math.cos(d) + Math.cos(latRad) * Math.sin(d) * Math.cos(brng)
+    );
+    const lng2 =
+      lngRad +
+      Math.atan2(
+        Math.sin(brng) * Math.sin(d) * Math.cos(latRad),
+        Math.cos(d) - Math.sin(latRad) * Math.sin(lat2)
+      );
+    coords.push([deg(lng2), deg(lat2)]);
+  }
 
-        // Create an Amazon Location client with the signed credentials
-        const client = new LocationClient({
-          region,
-          credentials: {
-            accessKeyId: credentials.accessKeyId,
-            secretAccessKey: credentials.secretAccessKey,
-            sessionToken: credentials.sessionToken,
-            expiration: credentials.expiration,
-          },
+  return {
+    type: "Feature",
+    geometry: { type: "Polygon", coordinates: [coords] },
+    properties: {},
+  };
+}
+
+function addOrUpdateSourcesAndLayers(map, position, accuracy = 30) {
+  // Point source
+  const pointFeature = {
+    type: "Feature",
+    geometry: {
+      type: "Point",
+      coordinates: [position.lng, position.lat],
+    },
+    properties: {},
+  };
+
+  // Accuracy polygon
+  const accuracyFeature = circlePolygon([position.lng, position.lat], accuracy);
+
+  if (!map.getSource(POS_SOURCE_ID)) {
+    map.addSource(POS_SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [pointFeature] },
+    });
+  } else {
+    map.getSource(POS_SOURCE_ID).setData({
+      type: "FeatureCollection",
+      features: [pointFeature],
+    });
+  }
+
+  if (!map.getLayer(POS_LAYER_ID)) {
+    map.addLayer({
+      id: POS_LAYER_ID,
+      type: "circle",
+      source: POS_SOURCE_ID,
+      paint: {
+        "circle-radius": 6,
+        "circle-color": "#00E0FF",
+        "circle-stroke-color": "#002C3D",
+        "circle-stroke-width": 2,
+      },
+    });
+  }
+
+  if (!map.getSource(ACC_SOURCE_ID)) {
+    map.addSource(ACC_SOURCE_ID, {
+      type: "geojson",
+      data: accuracyFeature,
+    });
+  } else {
+    map.getSource(ACC_SOURCE_ID).setData(accuracyFeature);
+  }
+
+  if (!map.getLayer(ACC_LAYER_ID)) {
+    map.addLayer({
+      id: ACC_LAYER_ID,
+      type: "fill",
+      source: ACC_SOURCE_ID,
+      paint: {
+        "fill-color": "#00E0FF",
+        "fill-opacity": 0.12,
+      },
+    });
+  }
+}
+
+export function startLocationUpdates(map, { follow = true } = {}) {
+  if (!("geolocation" in navigator)) {
+    throw new Error("Geolocation is not supported by this browser.");
+  }
+  if (watchId !== null) return; // already running
+
+  watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const { latitude, longitude, accuracy, heading, speed } = pos.coords;
+      const position = { lat: latitude, lng: longitude, accuracy, heading, speed };
+
+      addOrUpdateSourcesAndLayers(map, position, accuracy || 30);
+
+      if (follow) {
+        // Smooth follow
+        map.easeTo({
+          center: [position.lng, position.lat],
+          duration: 800,
+          easing: (t) => t,
         });
-
-        const sendUpdate = async (lng, lat) => {
-          try {
-            const cmd = new BatchUpdateDevicePositionCommand({
-              TrackerName: TRACKER_NAME,
-              Updates: [
-                {
-                  DeviceId: identityId,
-                  Position: [lng, lat], // [longitude, latitude]
-                  SampleTime: new Date().toISOString(),
-                },
-              ],
-            });
-
-            const res = await client.send(cmd);
-            if (res.Errors && res.Errors.length) {
-              console.error(
-                "[LocationUpdater] BatchUpdateDevicePosition errors:",
-                res.Errors
-              );
-            } else {
-              // console.log("[LocationUpdater] Position updated:", { lng, lat });
-            }
-          } catch (err) {
-            console.error("[LocationUpdater] Update failed:", err);
-          }
-        };
-
-        const updateFromNavigator = () => {
-          if (!("geolocation" in navigator)) {
-            console.warn(
-              "[LocationUpdater] Geolocation not available in this browser."
-            );
-            return;
-          }
-
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              const { latitude, longitude } = pos.coords;
-              sendUpdate(longitude, latitude);
-            },
-            (err) => {
-              console.warn("[LocationUpdater] Geolocation error:", err);
-            },
-            { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 }
-          );
-        };
-
-        // Kick off immediately, then on an interval
-        updateFromNavigator();
-        timerId = setInterval(updateFromNavigator, UPDATE_INTERVAL_MS);
-      } catch (e) {
-        console.error("[LocationUpdater] init error:", e);
       }
-    };
+    },
+    (err) => {
+      console.error("[Location] error:", err);
+      alert(`Location error: ${err.message}`);
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 15000,
+    }
+  );
+}
 
-    if (isMounted) start();
+export function stopLocationUpdates() {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+}
 
-    return () => {
-      isMounted = false;
-      if (timerId) clearInterval(timerId);
-    };
-  }, []);
-
-  // This component has no UI; it just runs side effects
-  return null;
+export function isRunning() {
+  return watchId !== null;
 }
