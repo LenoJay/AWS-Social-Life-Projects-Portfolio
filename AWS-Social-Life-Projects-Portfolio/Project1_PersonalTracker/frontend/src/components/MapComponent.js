@@ -1,225 +1,278 @@
-// src/components/MapComponent.js
 import React, { useEffect, useRef, useState } from "react";
-import { Amplify } from "aws-amplify";
-import awsExports from "../aws-exports";
-import { createMap } from "maplibre-gl-js-amplify";
 import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
+import { createMap } from "maplibre-gl-js-amplify";
 import * as turf from "@turf/turf";
-import { startLocationUpdates, stopLocationUpdates, isRunning } from "./LocationUpdater";
-import { getGroupLocations, setStatus } from "../api";
+import { updateLocation, getGroupLocations, setStatus, joinGroup } from "../api"; // adjust path if needed
 
-Amplify.configure(awsExports);
+// London default
+const DEFAULT_CENTER = [-0.1276, 51.5074]; // [lng, lat]
+const DEFAULT_ZOOM = 12;
 
-// Choose your active group here
-const DEFAULT_GROUP_ID = "group-1";
-
-export default function MapComponent() {
-  const mapContainerRef = useRef(null);
+function MapComponent() {
   const mapRef = useRef(null);
+  const mapDivRef = useRef(null);
 
-  const [trackingState, setTrackingState] = useState("idle"); // idle | ready | tracking
-  const [myStatusText, setMyStatusText] = useState("OMW!");
+  const myMarkerRef = useRef(null);
+  const myAccuracyRef = useRef(null);
+
+  const trailCoordsRef = useRef([]); // [[lng,lat], ...]
+  const trailSourceId = "my-trail-source";
+  const trailLayerId = "my-trail-line";
+
+  const othersRef = useRef({}); // userId -> { marker, bubble }
   const pollTimerRef = useRef(null);
 
-  const trailRef = useRef([]);
-  const myMarkerRef = useRef(null);
-  const othersRef = useRef(new Map());
+  const [isTracking, setIsTracking] = useState(false);
+  const [myStatusText, setMyStatusText] = useState("idle");
+  const [groupId, setGroupId] = useState(""); // set this somewhere in your UI if you want to join
 
+  // ----- MAP INIT -----
   useEffect(() => {
-    let disposed = false;
+    let cancelled = false;
 
     (async () => {
-      try {
-        const map = await createMap({
-          container: mapContainerRef.current,
-          center: [-0.1276, 51.5074], // London
-          zoom: 12,
-        });
-        if (disposed) return;
-        mapRef.current = map;
+      if (mapRef.current) return;
 
-        map.on("load", () => {
-          map.addSource("me-point-src", { type: "geojson", data: turf.point([-0.1276, 51.5074]) });
-          map.addSource("me-trail-src", { type: "geojson", data: turf.lineString([]) });
-          map.addSource("me-accuracy-src", { type: "geojson", data: turf.featureCollection([]) });
+      const map = await createMap({
+        container: mapDivRef.current,
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+      });
 
-          map.addLayer({ id: "me-trail", type: "line", source: "me-trail-src",
-            paint: { "line-color": "#0ea5e9", "line-width": 4, "line-opacity": 0.9 } });
-          map.addLayer({ id: "me-accuracy", type: "fill", source: "me-accuracy-src",
-            paint: { "fill-color": "#0ea5e9", "fill-opacity": 0.15 } });
-          map.addLayer({ id: "me-dot", type: "circle", source: "me-point-src",
-            paint: { "circle-radius": 6, "circle-color": "#0ea5e9", "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 } });
+      if (cancelled) return;
+      mapRef.current = map;
 
-          // My status bubble marker
-          myMarkerRef.current = createStatusMarker(myStatusText, "#0ea5e9");
-          myMarkerRef.current.setLngLat([-0.1276, 51.5074]).addTo(map);
-
-          setTrackingState("ready");
-
-          // Start polling real group members
-          startPolling();
-        });
-      } catch (e) {
-        console.error("[Map] init failed:", e);
-        alert(`Map failed to initialize: ${e?.message || e}`);
-      }
+      map.on("load", () => {
+        // Add empty source for trail (we will set data later)
+        if (!map.getSource(trailSourceId)) {
+          map.addSource(trailSourceId, {
+            type: "geojson",
+            data: turf.featureCollection([]),
+          });
+        }
+        if (!map.getLayer(trailLayerId)) {
+          map.addLayer({
+            id: trailLayerId,
+            type: "line",
+            source: trailSourceId,
+            paint: {
+              "line-color": "#3b82f6",
+              "line-width": 3,
+            },
+          });
+        }
+      });
     })();
 
     return () => {
-      disposed = true;
-      stopLocationUpdates();
+      cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
-      othersRef.current.forEach(({ marker }) => marker.remove());
-      othersRef.current.clear();
+      if (mapRef.current) {
+        // Cleanly remove layers/sources we added
+        const map = mapRef.current;
+        if (map.getLayer(trailLayerId)) map.removeLayer(trailLayerId);
+        if (map.getSource(trailSourceId)) map.removeSource(trailSourceId);
+        map.remove();
+        mapRef.current = null;
+      }
     };
   }, []);
 
-  // Update my bubble text + push to backend
-  useEffect(() => {
-    if (myMarkerRef.current) updateStatusMarker(myMarkerRef.current, myStatusText);
-    // Don’t block UI if API fails
-    setStatus({ groupId: DEFAULT_GROUP_ID, status: myStatusText }).catch(() => {});
-  }, [myStatusText]);
+  // ----- DRAW / UPDATE MY MARKER + ACCURACY -----
+  const renderSelf = (lng, lat, accuracy) => {
+    const map = mapRef.current;
+    if (!map) return;
 
-  const handleStart = () => {
-    if (!mapRef.current) return;
-    if (!isRunning()) {
-      startLocationUpdates({
-        groupId: DEFAULT_GROUP_ID,
-        status: myStatusText,
-        onUpdate: (p) => onMyPosition(p),
+    // Marker (You are here)
+    if (!myMarkerRef.current) {
+      const el = document.createElement("div");
+      el.style.width = "14px";
+      el.style.height = "14px";
+      el.style.borderRadius = "50%";
+      el.style.background = "#10b981"; // green
+      el.style.boxShadow = "0 0 0 2px #fff";
+      myMarkerRef.current = new maplibregl.Marker({ element: el })
+        .setLngLat([lng, lat])
+        .addTo(map);
+    } else {
+      myMarkerRef.current.setLngLat([lng, lat]);
+    }
+
+    // Accuracy circle
+    const radiusInKm = Math.max(0, (accuracy || 0) / 1000);
+    const circle = turf.circle([lng, lat], radiusInKm, { steps: 50, units: "kilometers" });
+    const srcId = "self-accuracy-src";
+    const layerId = "self-accuracy-layer";
+    if (!map.getSource(srcId)) {
+      map.addSource(srcId, { type: "geojson", data: circle });
+      map.addLayer({
+        id: layerId,
+        type: "fill",
+        source: srcId,
+        paint: {
+          "fill-color": "#10b981",
+          "fill-opacity": 0.15,
+        },
       });
-      setTrackingState("tracking");
+    } else {
+      map.getSource(srcId).setData(circle);
     }
   };
 
-  const handleStop = () => {
-    stopLocationUpdates();
-    setTrackingState("ready");
+  // ----- TRAIL: only draw a line if >= 2 points -----
+  const updateTrail = () => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const coords = trailCoordsRef.current;
+    const src = map.getSource(trailSourceId);
+
+    if (!src) return;
+
+    if (coords.length >= 2) {
+      const line = turf.lineString(coords);
+      src.setData(line);
+    } else {
+      // Show nothing when < 2 points
+      src.setData(turf.featureCollection([]));
+    }
   };
 
-  const handleRecenter = () => {
-    const map = mapRef.current; if (!map) return;
-    const data = map.getSource("me-point-src")?._data;
-    const center = (data && data.geometry?.coordinates) || [-0.1276, 51.5074];
-    map.easeTo({ center, duration: 600 });
-  };
+  // ----- GEOLOCATION: Start / Stop -----
+  const startTracking = async () => {
+    setIsTracking(true);
+    // If you have a default group to join, do it here
+    try {
+      if (groupId) {
+        await joinGroup({ groupId });
+      }
+    } catch (_) {}
 
-  function onMyPosition({ lng, lat, accuracy }) {
-    const map = mapRef.current; if (!map) return;
+    // First position update to center
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const { longitude: lng, latitude: lat, accuracy } = pos.coords;
+          renderSelf(lng, lat, accuracy);
+          mapRef.current?.flyTo({ center: [lng, lat], zoom: 15, essential: true });
+          // push trail point
+          trailCoordsRef.current.push([lng, lat]);
+          updateTrail();
 
-    map.getSource("me-point-src").setData(turf.point([lng, lat]));
-    trailRef.current.push([lng, lat]);
-    map.getSource("me-trail-src").setData(turf.lineString(trailRef.current));
+          // send to backend
+          try {
+            await updateLocation({ lat, lng, accuracy });
+          } catch (e) {
+            console.warn("updateLocation failed", e);
+          }
+        },
+        (err) => console.warn("getCurrentPosition error", err),
+        { enableHighAccuracy: true }
+      );
+    }
 
-    const circle = turf.circle([lng, lat], Math.max(accuracy, 10) / 1000, { steps: 64, units: "kilometers" });
-    map.getSource("me-accuracy-src").setData(circle);
-
-    if (myMarkerRef.current) myMarkerRef.current.setLngLat([lng, lat]);
-  }
-
-  function startPolling() {
+    // Start polling other users every 5s
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    const poll = async () => {
-      try {
-        const resp = await getGroupLocations({ groupId: DEFAULT_GROUP_ID });
-        const items = resp.items || resp || []; // support different response shapes
-        renderGroupMarkers(items);
-      } catch (e) {
-        console.warn("[Poll] error:", e.message);
-      }
-    };
-    poll(); // immediately
-    pollTimerRef.current = setInterval(poll, 7000);
-  }
+    pollTimerRef.current = setInterval(refreshOthers, 5000);
+  };
 
-  function renderGroupMarkers(devices) {
-    const map = mapRef.current; if (!map) return;
-    const alive = new Set(devices.map((d) => d.UserId));
+  const stopTracking = () => {
+    setIsTracking(false);
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+  };
 
-    // remove stale
-    for (const [id, { marker }] of othersRef.current) {
-      if (!alive.has(id)) { marker.remove(); othersRef.current.delete(id); }
+  // ----- OTHER USERS -----
+  const refreshOthers = async () => {
+    const map = mapRef.current;
+    if (!map || !groupId) return;
+    let data;
+    try {
+      data = await getGroupLocations({ groupId });
+    } catch (e) {
+      console.warn("getGroupLocations failed", e);
+      return;
     }
 
-    devices.forEach((d) => {
-      const id = d.UserId;
-      const lng = d.Lng, lat = d.Lat;
-      if (typeof lng !== "number" || typeof lat !== "number") return;
+    // data.items = [{ userId, lat, lng, status, updatedAt }, ...]
+    const existing = othersRef.current;
+    const seen = new Set();
 
-      const color = "#f97316";
-      const text = d.Status || "Here";
-      let entry = othersRef.current.get(id);
+    for (const u of data.items || []) {
+      const key = u.userId;
+      seen.add(key);
+      const lng = u.lng;
+      const lat = u.lat;
 
-      if (!entry) {
-        const m = createStatusMarker(text, color);
-        m.setLngLat([lng, lat]).addTo(map);
-        othersRef.current.set(id, { marker: m });
+      if (!existing[key]) {
+        // marker
+        const el = document.createElement("div");
+        el.style.width = "12px";
+        el.style.height = "12px";
+        el.style.borderRadius = "50%";
+        el.style.background = "#ef4444"; // red for others
+        el.style.boxShadow = "0 0 0 2px #fff";
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([lng, lat])
+          .addTo(map);
+
+        // bubble (status)
+        const bubble = new maplibregl.Popup({ closeButton: false, closeOnClick: false })
+          .setLngLat([lng, lat])
+          .setHTML(`<div style="padding:4px 8px;border-radius:8px;background:#111;color:#fff;font-size:12px">${u.status || ""}</div>`)
+          .addTo(map);
+
+        existing[key] = { marker, bubble };
       } else {
-        updateStatusMarker(entry.marker, text, color);
-        entry.marker.setLngLat([lng, lat]);
+        existing[key].marker.setLngLat([lng, lat]);
+        existing[key].bubble.setLngLat([lng, lat]).setHTML(
+          `<div style="padding:4px 8px;border-radius:8px;background:#111;color:#fff;font-size:12px">${u.status || ""}</div>`
+        );
       }
-    });
-  }
+    }
+
+    // remove any not seen
+    for (const key of Object.keys(existing)) {
+      if (!seen.has(key)) {
+        existing[key].marker.remove();
+        existing[key].bubble.remove();
+        delete existing[key];
+      }
+    }
+  };
+
+  // ----- STATUS QUICK BUTTONS -----
+  const sendStatus = async (txt) => {
+    setMyStatusText(txt);
+    try {
+      await setStatus({ groupId, status: txt });
+    } catch (e) {
+      console.warn("setStatus failed", e);
+    }
+  };
 
   return (
-    <div style={{ width: "100%", height: "100%", position: "relative" }}>
-      <div ref={mapContainerRef} style={{ width: "100%", height: "520px", borderRadius: 12, background: "#111" }} />
-      <div style={toolbarStyle}>
-        {trackingState !== "tracking" ? (
-          <button onClick={handleStart} style={btnStyle}>Start tracking</button>
+    <div style={{ height: "100%", width: "100%" }}>
+      <div style={{ padding: 8, display: "flex", gap: 8 }}>
+        <input
+          placeholder="Group ID"
+          value={groupId}
+          onChange={(e) => setGroupId(e.target.value.trim())}
+          style={{ padding: "6px 8px", border: "1px solid #ddd", borderRadius: 6 }}
+        />
+        {!isTracking ? (
+          <button onClick={startTracking}>Start tracking</button>
         ) : (
-          <button onClick={handleStop} style={btnStyle}>Stop tracking</button>
+          <button onClick={stopTracking}>Stop tracking</button>
         )}
-        <button onClick={handleRecenter} style={btnStyle}>Recenter me</button>
-        <div style={{ display: "flex", gap: 6 }}>
-          {["OMW!", "I’m safe", "Need help", "Here"].map((txt) => (
-            <button
-              key={txt}
-              onClick={() => setMyStatusText(txt)}
-              style={{ ...btnStyle, background: txt === myStatusText ? "#22c55e" : "#334155" }}
-            >
-              {txt}
-            </button>
-          ))}
-        </div>
-        <span style={{ opacity: 0.9 }}>Status: <strong>{trackingState}</strong></span>
+        <button onClick={() => sendStatus("OMW!")}>OMW!</button>
+        <button onClick={() => sendStatus("I'm safe")}>I'm safe</button>
+        <button onClick={() => sendStatus("Need help")}>Need help</button>
+        <div style={{ marginLeft: 8 }}>Status: {myStatusText}</div>
       </div>
+
+      <div ref={mapDivRef} style={{ height: "calc(100% - 48px)", width: "100%" }} />
     </div>
   );
 }
 
-function createStatusMarker(text, color = "#0ea5e9") {
-  const el = document.createElement("div");
-  el.style.position = "relative";
-
-  const dot = document.createElement("div");
-  dot.style.width = "12px"; dot.style.height = "12px"; dot.style.borderRadius = "999px";
-  dot.style.background = color; dot.style.border = "2px solid #fff"; dot.style.boxShadow = "0 0 0 2px rgba(0,0,0,0.2)";
-  dot.style.transform = "translate(-50%, -50%)"; dot.style.position = "absolute"; dot.style.left = "50%"; dot.style.top = "50%";
-  el.appendChild(dot);
-
-  const bubble = document.createElement("div");
-  bubble.style.position = "absolute"; bubble.style.whiteSpace = "nowrap"; bubble.style.left = "50%"; bubble.style.bottom = "18px"; bubble.style.transform = "translateX(-50%)";
-  bubble.style.background = "rgba(17,17,17,0.85)"; bubble.style.color = "#fff"; bubble.style.fontSize = "12px"; bubble.style.padding = "6px 8px";
-  bubble.style.borderRadius = "8px"; bubble.style.border = `1px solid ${color}`; bubble.style.boxShadow = "0 2px 8px rgba(0,0,0,0.25)";
-  bubble.textContent = text; bubble.className = "status-bubble";
-  el.appendChild(bubble);
-
-  return new maplibregl.Marker({ element: el, anchor: "bottom" });
-}
-
-function updateStatusMarker(marker, newText, color = "#0ea5e9") {
-  const el = marker.getElement();
-  const bubble = el.querySelector(".status-bubble");
-  if (bubble) { bubble.textContent = newText; bubble.style.border = `1px solid ${color}`; }
-}
-
-const toolbarStyle = {
-  position: "absolute", top: 12, left: 12, display: "flex", gap: 8,
-  background: "rgba(20,20,20,0.7)", borderRadius: 8, padding: "8px 10px",
-  color: "#fff", fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
-};
-const btnStyle = { background: "#0EA5E9", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer" };
+export default MapComponent;
