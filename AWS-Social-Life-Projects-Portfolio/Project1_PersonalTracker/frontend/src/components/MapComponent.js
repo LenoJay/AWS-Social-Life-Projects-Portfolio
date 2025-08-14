@@ -7,41 +7,44 @@ import {
   getGroupLocations,
   setStatus,
   joinGroup,
-} from "../api"; // adjust path if needed
+} from "../api";
+import { getCurrentUser } from "@aws-amplify/auth";
+
+// ---- Optional WebSocket push for geofence events ----
+// If you later create a WebSocket API (see guide below), put its wss URL here.
+// Leave as "" to disable gracefully.
+const WS_URL = ""; // e.g. "wss://abc123.execute-api.eu-central-1.amazonaws.com/prod"
 
 // London default
-const DEFAULT_CENTER = [-0.1276, 51.5074]; // [lng, lat]
+const DEFAULT_CENTER = [-0.1276, 51.5074];
 const DEFAULT_ZOOM = 12;
 
 // presence thresholds
-const ONLINE_WINDOW_MS = 60 * 1000; // 60s
+const ONLINE_WINDOW_MS = 60 * 1000;
 
 // clamp accuracy circle radius (in meters)
 const ACCURACY_MIN_M = 10;
 const ACCURACY_MAX_M = 150;
 
-// layers / sources ids
+// layers / sources
 const TRAIL_SRC = "my-trail-src";
 const TRAIL_LAYER = "my-trail-layer";
-
 const OTHERS_SRC = "others-src";
 const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
-
 const FENCE_SRC = "fences-src";
 const FENCE_FILL = "fences-fill";
 const FENCE_LINE = "fences-line";
 
-// utils
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 function timeAgo(ts) {
   try {
     const diff = Date.now() - new Date(ts).getTime();
-    if (diff < 1000 * 60) return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
-    if (diff < 1000 * 60 * 60) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 60 * 1000) return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
+    if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}m ago`;
     return `${Math.floor(diff / 3600000)}h ago`;
   } catch {
     return "";
@@ -51,52 +54,63 @@ function timeAgo(ts) {
 export default function MapComponent() {
   const mapRef = useRef(null);
   const mapDivRef = useRef(null);
-
   const myMarkerRef = useRef(null);
   const myLastSelfRef = useRef(null);
   const myAccuracySrcId = "self-accuracy-src";
   const myAccuracyLayerId = "self-accuracy-layer";
-
-  const trailCoordsRef = useRef([]); // [[lng,lat], ...]
+  const trailCoordsRef = useRef([]);
   const pollTimerRef = useRef(null);
+  const wsRef = useRef(null);
 
   const [groupId, setGroupId] = useState("");
   const [isTracking, setIsTracking] = useState(false);
   const [myStatusText, setMyStatusText] = useState("idle");
-  const [toasts, setToasts] = useState([]); // {id, text}
+  const [toasts, setToasts] = useState([]);
+  const [username, setUsername] = useState("");
 
-  // styles
+  // ---- styles
   const styles = {
-    page: {
+    pageOuter: {
       minHeight: "100vh",
       width: "100%",
+      // layered background: deep blue base + radial glow
       background:
-        "linear-gradient(180deg, #0b1220 0%, #0d1324 50%, #0b1220 100%)",
+        "radial-gradient(1200px 600px at 10% -10%, #1a2a6c22 30%, transparent 60%)," +
+        "radial-gradient(800px 500px at 90% 0%, #b21f1f22 20%, transparent 55%)," +
+        "linear-gradient(180deg, #0a101d 0%, #0d1426 50%, #0a101d 100%)",
       color: "#e5e7eb",
-      padding: "20px",
+      padding: 20,
       boxSizing: "border-box",
     },
     header: {
       display: "flex",
       justifyContent: "space-between",
       alignItems: "center",
-      marginBottom: "14px",
+      marginBottom: 14,
     },
     title: {
       fontSize: 24,
       fontWeight: 800,
       letterSpacing: 0.3,
     },
+    userBadge: {
+      fontSize: 13,
+      padding: "6px 10px",
+      borderRadius: 999,
+      background: "#111827",
+      border: "1px solid #374151",
+      color: "#e5e7eb",
+    },
     topBar: {
       display: "flex",
       flexWrap: "wrap",
-      gap: "10px",
+      gap: 10,
       alignItems: "center",
-      marginBottom: "12px",
+      marginBottom: 12,
     },
     input: {
       padding: "8px 10px",
-      borderRadius: "8px",
+      borderRadius: 8,
       border: "1px solid #374151",
       background: "#0f172a",
       color: "#e5e7eb",
@@ -105,7 +119,7 @@ export default function MapComponent() {
     },
     btn: {
       padding: "8px 12px",
-      borderRadius: "8px",
+      borderRadius: 8,
       border: "1px solid transparent",
       cursor: "pointer",
       fontWeight: 600,
@@ -120,21 +134,18 @@ export default function MapComponent() {
     statusText: { marginLeft: 8, fontWeight: 600, color: "#cbd5e1" },
     card: {
       width: "100%",
-      borderRadius: "12px",
+      borderRadius: 12,
       overflow: "hidden",
       background: "#0f172a",
       border: "1px solid #1f2937",
-      boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+      boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
     },
-    map: {
-      width: "100%",
-      height: "520px",
-    },
+    map: { width: "100%", height: "520px" },
     footerBar: {
       display: "flex",
-      gap: "10px",
+      gap: 10,
       alignItems: "center",
-      padding: "10px",
+      padding: 10,
       borderTop: "1px solid #1f2937",
       background: "#0b1220",
     },
@@ -156,8 +167,21 @@ export default function MapComponent() {
       padding: "10px 12px",
       boxShadow: "0 10px 30px rgba(0,0,0,.35)",
       fontSize: 14,
+      maxWidth: 360,
     },
   };
+
+  // signed-in username
+  useEffect(() => {
+    (async () => {
+      try {
+        const user = await getCurrentUser();
+        setUsername(user.username || "");
+      } catch {
+        setUsername("");
+      }
+    })();
+  }, []);
 
   // load saved group
   useEffect(() => {
@@ -165,7 +189,7 @@ export default function MapComponent() {
     if (saved) setGroupId(saved);
   }, []);
 
-  // initialize map
+  // init map
   useEffect(() => {
     let cancelled = false;
 
@@ -188,7 +212,7 @@ export default function MapComponent() {
         map.on("dragend", () => (canvas.style.cursor = "grab"));
         setTimeout(() => map.resize(), 0);
 
-        // Trail
+        // trail
         if (!map.getSource(TRAIL_SRC)) {
           map.addSource(TRAIL_SRC, {
             type: "geojson",
@@ -200,14 +224,11 @@ export default function MapComponent() {
             id: TRAIL_LAYER,
             type: "line",
             source: TRAIL_SRC,
-            paint: {
-              "line-color": "#3b82f6",
-              "line-width": 3,
-            },
+            paint: { "line-color": "#3b82f6", "line-width": 3 },
           });
         }
 
-        // Others (clustered)
+        // others (cluster)
         if (!map.getSource(OTHERS_SRC)) {
           map.addSource(OTHERS_SRC, {
             type: "geojson",
@@ -224,15 +245,7 @@ export default function MapComponent() {
             filter: ["has", "point_count"],
             paint: {
               "circle-color": "#334155",
-              "circle-radius": [
-                "step",
-                ["get", "point_count"],
-                16,
-                10,
-                22,
-                25,
-                28,
-              ],
+              "circle-radius": ["step", ["get", "point_count"], 16, 10, 22, 25, 28],
               "circle-stroke-width": 1.5,
               "circle-stroke-color": "#0f172a",
             },
@@ -259,7 +272,6 @@ export default function MapComponent() {
             source: OTHERS_SRC,
             filter: ["!", ["has", "point_count"]],
             paint: {
-              // green if updated <60s, gray otherwise
               "circle-color": [
                 "case",
                 [
@@ -281,7 +293,6 @@ export default function MapComponent() {
           });
         }
 
-        // cluster click -> zoom
         map.on("click", OTHERS_LAYER_CLUSTER, (e) => {
           const features = map.queryRenderedFeatures(e.point, {
             layers: [OTHERS_LAYER_CLUSTER],
@@ -291,14 +302,10 @@ export default function MapComponent() {
             .getSource(OTHERS_SRC)
             .getClusterExpansionZoom(clusterId, (err, zoom) => {
               if (err) return;
-              map.easeTo({
-                center: features[0].geometry.coordinates,
-                zoom,
-              });
+              map.easeTo({ center: features[0].geometry.coordinates, zoom });
             });
         });
 
-        // unclustered click -> popup with status + timeago
         map.on("click", OTHERS_LAYER_UNCLUSTERED, (e) => {
           const f = e.features && e.features[0];
           if (!f) return;
@@ -315,7 +322,7 @@ export default function MapComponent() {
             .addTo(map);
         });
 
-        // Optional: load geofences from /geojson/fences.geojson
+        // Optional: fences layer if you provide /public/geojson/fences.geojson
         try {
           const res = await fetch("/geojson/fences.geojson", { cache: "no-store" });
           if (res.ok) {
@@ -336,16 +343,21 @@ export default function MapComponent() {
               });
             }
           }
-        } catch (_) {}
+        } catch {}
       });
     })();
 
     return () => {
       cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {}
+        wsRef.current = null;
+      }
       if (mapRef.current) {
         const map = mapRef.current;
-        // remove our layers / sources
         [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT, FENCE_FILL, FENCE_LINE].forEach(
           (id) => map.getLayer(id) && map.removeLayer(id)
         );
@@ -358,14 +370,47 @@ export default function MapComponent() {
     };
   }, []);
 
-  // render self marker + accuracy (clamped)
+  // ---- optional WebSocket for SNS -> browser geofence events
+  useEffect(() => {
+    if (!WS_URL) return; // disabled
+    if (wsRef.current) return;
+    try {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        // Optionally send a hello that includes the current group (if your $connect Lambda needs it)
+        if (groupId) {
+          ws.send(JSON.stringify({ action: "hello", groupId }));
+        }
+      };
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          // Expected message shape from your broadcaster Lambda:
+          // { type: "geofence", action: "ENTER"|"EXIT", fenceId, fenceName, at }
+          if (msg.type === "geofence") {
+            const t =
+              (msg.action === "ENTER" ? "Entered" : "Exited") +
+              (msg.fenceName ? ` ${msg.fenceName}` : " geofence");
+            showToast(t);
+          }
+        } catch {}
+      };
+      ws.onclose = () => {
+        wsRef.current = null;
+      };
+    } catch {
+      wsRef.current = null;
+    }
+  }, [groupId]);
+
+  // render self marker + accuracy (clamped small)
   const renderSelf = (lng, lat, accuracy) => {
     const map = mapRef.current;
     if (!map) return;
-
     myLastSelfRef.current = { lng, lat };
 
-    // marker
     if (!myMarkerRef.current) {
       const el = document.createElement("div");
       el.style.width = "14px";
@@ -380,7 +425,6 @@ export default function MapComponent() {
       myMarkerRef.current.setLngLat([lng, lat]);
     }
 
-    // accuracy (clamped, small + subtle)
     if (typeof accuracy === "number") {
       const m = clamp(accuracy, ACCURACY_MIN_M, ACCURACY_MAX_M);
       const circle = turf.circle([lng, lat], m / 1000, {
@@ -393,10 +437,7 @@ export default function MapComponent() {
           id: myAccuracyLayerId,
           type: "fill",
           source: myAccuracySrcId,
-          paint: {
-            "fill-color": "#10b981",
-            "fill-opacity": 0.12,
-          },
+          paint: { "fill-color": "#10b981", "fill-opacity": 0.12 },
         });
       } else {
         map.getSource(myAccuracySrcId).setData(circle);
@@ -404,34 +445,31 @@ export default function MapComponent() {
     }
   };
 
-  // update trail safely
   const updateTrail = () => {
     const map = mapRef.current;
     if (!map) return;
     const coords = trailCoordsRef.current;
     const src = map.getSource(TRAIL_SRC);
     if (!src) return;
-
-    if (coords.length >= 2) {
-      src.setData(turf.lineString(coords));
-    } else {
-      src.setData(turf.featureCollection([]));
-    }
+    if (coords.length >= 2) src.setData(turf.lineString(coords));
+    else src.setData(turf.featureCollection([]));
   };
 
-  // join group & persist
   const handleJoinGroup = async () => {
     if (!groupId) return;
     try {
       await joinGroup({ groupId });
       localStorage.setItem("pt_group", groupId);
       showToast(`Joined group "${groupId}"`);
-    } catch (e) {
+      // inform WS (if open) of new group
+      if (wsRef.current && wsRef.current.readyState === 1) {
+        wsRef.current.send(JSON.stringify({ action: "hello", groupId }));
+      }
+    } catch {
       showToast("Failed to join group");
     }
   };
 
-  // invite = copy code
   const copyInvite = async () => {
     if (!groupId) return;
     try {
@@ -442,7 +480,6 @@ export default function MapComponent() {
     }
   };
 
-  // start / stop
   const startTracking = async () => {
     setIsTracking(true);
     if (groupId) await handleJoinGroup();
@@ -460,8 +497,6 @@ export default function MapComponent() {
           } catch (e) {
             console.warn("updateLocation failed", e);
           }
-          // geofence UX (client-side) — if fences loaded, show toast if inside one
-          checkClientGeofence([lng, lat]);
         },
         (err) => console.warn("getCurrentPosition error", err),
         { enableHighAccuracy: true }
@@ -478,12 +513,12 @@ export default function MapComponent() {
   };
 
   const recenter = () => {
-    const map = mapRef.current;
     const p = myLastSelfRef.current;
-    if (map && p) map.flyTo({ center: [p.lng, p.lat], zoom: 15, essential: true });
+    if (mapRef.current && p) {
+      mapRef.current.flyTo({ center: [p.lng, p.lat], zoom: 15, essential: true });
+    }
   };
 
-  // others (clustered) refresh
   const refreshOthers = async () => {
     const map = mapRef.current;
     if (!map || !groupId) return;
@@ -508,7 +543,6 @@ export default function MapComponent() {
     }
   };
 
-  // set status
   const sendStatus = async (txt) => {
     setMyStatusText(txt);
     try {
@@ -518,26 +552,6 @@ export default function MapComponent() {
     }
   };
 
-  // client-side geofence check (coarse UX helper)
-  const checkClientGeofence = (lngLat) => {
-    const map = mapRef.current;
-    const src = map?.getSource(FENCE_SRC);
-    if (!src) return;
-    const data = src._data || src._options?.data; // maplibre stores it internally
-    if (!data || !Array.isArray(data.features)) return;
-
-    const pt = turf.point(lngLat);
-    for (const f of data.features) {
-      if (f.geometry?.type === "Polygon" || f.geometry?.type === "MultiPolygon") {
-        if (turf.booleanPointInPolygon(pt, f)) {
-          showToast("You are inside a geofence");
-          return;
-        }
-      }
-    }
-  };
-
-  // toasts
   const showToast = (text) => {
     const t = { id: Date.now() + Math.random(), text };
     setToasts((prev) => [...prev, t]);
@@ -547,10 +561,11 @@ export default function MapComponent() {
   };
 
   return (
-    <div style={styles.page}>
+    <div style={styles.pageOuter}>
       {/* Header */}
       <div style={styles.header}>
         <div style={styles.title}>Real-Time Personal Tracker</div>
+        {username ? <div style={styles.userBadge}>Signed in as <b>{username}</b></div> : null}
       </div>
 
       {/* Controls */}
@@ -569,33 +584,17 @@ export default function MapComponent() {
         </button>
 
         {!isTracking ? (
-          <button style={styles.btn} onClick={startTracking}>
-            Start tracking
-          </button>
+          <button style={styles.btn} onClick={startTracking}>Start tracking</button>
         ) : (
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={stopTracking}>
-            Stop tracking
-          </button>
+          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={stopTracking}>Stop tracking</button>
         )}
 
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("OMW!")}>
-          OMW!
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("I'm safe")}>
-          I'm safe
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Delayed")}>
-          Delayed
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Be right back")}>
-          BRB
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Need help")}>
-          Need help
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Emergency")}>
-          Emergency
-        </button>
+        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("OMW!")}>OMW!</button>
+        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("I'm safe")}>I'm safe</button>
+        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Delayed")}>Delayed</button>
+        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Be right back")}>BRB</button>
+        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Need help")}>Need help</button>
+        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Emergency")}>Emergency</button>
 
         <div style={styles.statusText}>Status: {myStatusText}</div>
       </div>
@@ -614,9 +613,7 @@ export default function MapComponent() {
       {/* Toasts */}
       <div style={styles.toastWrap}>
         {toasts.map((t) => (
-          <div key={t.id} style={styles.toast}>
-            {t.text}
-          </div>
+          <div key={t.id} style={styles.toast}>{t.text}</div>
         ))}
       </div>
     </div>
