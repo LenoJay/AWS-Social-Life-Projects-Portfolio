@@ -13,7 +13,7 @@ import { getCurrentUser } from "@aws-amplify/auth";
 // ---- Optional WebSocket push for geofence events ----
 // If you later create a WebSocket API (see guide below), put its wss URL here.
 // Leave as "" to disable gracefully.
-const WS_URL = ""; // e.g. "wss://abc123.execute-api.eu-central-1.amazonaws.com/prod"
+const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/"; // e.g. "wss://abc123.execute-api.eu-central-1.amazonaws.com/prod"
 
 // London default
 const DEFAULT_CENTER = [-0.1276, 51.5074];
