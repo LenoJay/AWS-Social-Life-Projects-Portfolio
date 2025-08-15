@@ -1,43 +1,58 @@
-// src/api.js
 import { fetchAuthSession } from "@aws-amplify/auth";
 
-// Use your *full* Invoke URL incl. stage (you already have this)
-const BASE = "https://gogr7cxttb.execute-api.eu-central-1.amazonaws.com/dev";
+const BASE = "https://YOUR_API_ID.execute-api.eu-central-1.amazonaws.com/dev"; // replace with your API URL
 
 async function authFetch(path, opts = {}) {
   const sess = await fetchAuthSession();
   const idToken = sess.tokens?.idToken?.toString();
-  if (!idToken) throw new Error("Not authenticated");
-  const headers = { "Content-Type": "application/json", Authorization: idToken, ...(opts.headers || {}) };
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: idToken,
+    ...(opts.headers || {}),
+  };
   const res = await fetch(`${BASE}${path}`, { ...opts, headers });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  // Some endpoints might return no content; try to JSON-parse safely
-  const text = await res.text();
-  return text ? JSON.parse(text) : {};
+  const t = await res.text();
+  return t ? JSON.parse(t) : {};
 }
 
-export function joinGroup({ groupId, userId }) {
-  // Only call this if you have a /join-group route; otherwise skip and add membership in DynamoDB manually.
-  return authFetch("/join-group", {
+// --- NEW: Create a group ---
+export function createGroup({ displayName }) {
+  return authFetch("/create-group", {
     method: "POST",
-    body: JSON.stringify({ groupId, userId }),
+    body: JSON.stringify({ displayName }),
   });
 }
 
-export function updateLocation({ groupId, lat, lng, status }) {
+// --- NEW: Fetch group friendly name ---
+export function getGroup({ groupId }) {
+  return authFetch(`/group?groupId=${encodeURIComponent(groupId)}`);
+}
+
+// --- Update location with TTL ---
+export function updateLocation({ groupId, lat, lng, accuracy, status }) {
+  const ttlSeconds = 15 * 60; // 15 minutes
+  const expireAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+
   return authFetch("/update-location", {
     method: "POST",
-    body: JSON.stringify({ groupId, lat, lng, status }),
+    body: JSON.stringify({
+      groupId,
+      lat,
+      lng,
+      accuracy,
+      status,
+      expireAt, // pass TTL to backend
+    }),
   });
 }
 
-export function getGroupLocations({ groupId }) {
-  return authFetch(`/get-group-locations?groupId=${encodeURIComponent(groupId)}`, { method: "GET" });
-}
+// --- Existing ---
+export const getGroupLocations = ({ groupId }) =>
+  authFetch(`/get-group-locations?groupId=${encodeURIComponent(groupId)}`);
 
-export function setStatus({ groupId, status }) {
-  return authFetch("/set-status", {
-    method: "POST",
-    body: JSON.stringify({ groupId, status }),
-  });
-}
+export const setStatus = (p) =>
+  authFetch("/set-status", { method: "POST", body: JSON.stringify(p) });
+
+export const joinGroup = (p) =>
+  authFetch("/join-group", { method: "POST", body: JSON.stringify(p) });

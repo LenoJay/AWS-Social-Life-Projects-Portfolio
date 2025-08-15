@@ -7,6 +7,8 @@ import {
   getGroupLocations,
   setStatus,
   joinGroup,
+  createGroup, // ADDED
+  getGroup      // ADDED
 } from "../api";
 import { getCurrentUser } from "@aws-amplify/auth";
 
@@ -63,6 +65,8 @@ export default function MapComponent() {
   const wsRef = useRef(null);
 
   const [groupId, setGroupId] = useState("");
+  const [groupName, setGroupName] = useState("");       // ADDED (friendly name)
+  const [newGroupName, setNewGroupName] = useState(""); // ADDED (create UI)
   const [isTracking, setIsTracking] = useState(false);
   const [myStatusText, setMyStatusText] = useState("idle");
   const [toasts, setToasts] = useState([]);
@@ -93,6 +97,7 @@ export default function MapComponent() {
       fontWeight: 800,
       letterSpacing: 0.3,
     },
+    subTitle: { marginTop: 4, opacity: 0.85, fontSize: 13 }, // ADDED
     userBadge: {
       fontSize: 13,
       padding: "6px 10px",
@@ -183,10 +188,19 @@ export default function MapComponent() {
     })();
   }, []);
 
-  // load saved group
+  // load saved group + fetch friendly name
   useEffect(() => {
     const saved = localStorage.getItem("pt_group");
-    if (saved) setGroupId(saved);
+    if (saved) {
+      setGroupId(saved);
+      // fetch friendly name
+      (async () => {
+        try {
+          const g = await getGroup({ groupId: saved });
+          if (g?.displayName) setGroupName(g.displayName);
+        } catch {}
+      })();
+    }
   }, []);
 
   // init map
@@ -316,7 +330,7 @@ export default function MapComponent() {
             .setHTML(
               `<div style="padding:6px 8px;border-radius:10px;background:#111;color:#fff;font-size:12px">
                  <div style="font-weight:700;margin-bottom:4px">${status || "No status"}</div>
-                 <div style="opacity:.8">${timeAgo(updatedAt)}</div>
+                 <div style="opacity:.8">updated ${timeAgo(updatedAt)}</div>
                </div>`
             )
             .addTo(map);
@@ -465,8 +479,39 @@ export default function MapComponent() {
       if (wsRef.current && wsRef.current.readyState === 1) {
         wsRef.current.send(JSON.stringify({ action: "hello", groupId }));
       }
+      // refresh friendly name
+      try {
+        const g = await getGroup({ groupId });
+        if (g?.displayName) setGroupName(g.displayName);
+      } catch {}
     } catch {
       showToast("Failed to join group");
+    }
+  };
+
+  // ADDED: create group (Minimal UI 7.2)
+  const handleCreateGroup = async () => {
+    if (!newGroupName.trim()) {
+      showToast("Enter a group name");
+      return;
+    }
+    try {
+      const res = await createGroup({ displayName: newGroupName.trim() });
+      if (res?.groupId) {
+        setGroupId(res.groupId);
+        localStorage.setItem("pt_group", res.groupId);
+        setGroupName(newGroupName.trim());
+        setNewGroupName("");
+        showToast(`Created "${res.displayName}" (code: ${res.groupId})`);
+        // notify WS
+        if (wsRef.current && wsRef.current.readyState === 1) {
+          wsRef.current.send(JSON.stringify({ action: "hello", groupId: res.groupId }));
+        }
+      } else {
+        showToast("Create group failed");
+      }
+    } catch (e) {
+      showToast("Create group error");
     }
   };
 
@@ -493,7 +538,8 @@ export default function MapComponent() {
           trailCoordsRef.current.push([lng, lat]);
           updateTrail();
           try {
-            await updateLocation({ lat, lng, accuracy });
+            // ADDED: pass groupId + accuracy
+            await updateLocation({ groupId, lat, lng, accuracy });
           } catch (e) {
             console.warn("updateLocation failed", e);
           }
@@ -564,12 +610,30 @@ export default function MapComponent() {
     <div style={styles.pageOuter}>
       {/* Header */}
       <div style={styles.header}>
-        <div style={styles.title}>Real-Time Personal Tracker</div>
+        <div>
+          <div style={styles.title}>
+            Real-Time Personal Tracker{groupName ? ` – ${groupName}` : ""}
+          </div>
+          {/* optional subtitle if you want to show code too */}
+          {groupId ? <div style={styles.subTitle}>Group code: {groupId}</div> : null}
+        </div>
         {username ? <div style={styles.userBadge}>Signed in as <b>{username}</b></div> : null}
       </div>
 
       {/* Controls */}
       <div style={styles.topBar}>
+        {/* NEW: Create Group (friendly name -> code) */}
+        <input
+          placeholder="Group name"
+          value={newGroupName}
+          onChange={(e) => setNewGroupName(e.target.value)}
+          style={styles.input}
+        />
+        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={handleCreateGroup}>
+          Create
+        </button>
+
+        {/* Existing: join by code */}
         <input
           placeholder="Group ID"
           value={groupId}
