@@ -1,38 +1,32 @@
-.App {
-  text-align: center;
+/* Base layout + dark background */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #1b2a4a22 30%, transparent 60%),
+    radial-gradient(800px 500px at 90% 0%, #2d1a1a22 20%, transparent 55%),
+    linear-gradient(180deg, #0f1628 0%, #0b1120 50%, #0f1628 100%);
+  color: #e5e7eb;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+/* MapLibre cursor polish */
+.maplibregl-canvas { cursor: grab; }
+.maplibregl-canvas:active { cursor: grabbing; }
+
+/* If an old top banner still exists outside the new header, soften it */
+body > p, body > div > p {
+  color: #e5e7eb !important;
+  background: transparent !important;
+  margin: 0 0 8px 0 !important;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
+/* Buttons (in case any global button styles exist) */
+button {
+  font-family: inherit;
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
+/* Optional: soften default anchor colours on dark bg */
+a { color: #93c5fd; }
+a:hover { color: #bfdbfe; }

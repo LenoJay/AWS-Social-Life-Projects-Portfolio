@@ -17,8 +17,8 @@ const WS_URL = ""; // optional WebSocket endpoint, leave blank to disable
 const DEFAULT_CENTER = [-0.1276, 51.5074]; // London [lng, lat]
 const DEFAULT_ZOOM = 12;
 const ONLINE_WINDOW_MS = 60 * 1000;
-const ACCURACY_MIN_M = 1;  // do not render smaller than 1m
-const ACCURACY_MAX_M = 10; // clamp at 10m maximum radius
+const ACCURACY_MIN_M = 1;   // never render below 1m
+const ACCURACY_MAX_M = 10;  // clamp circle to 10m max
 
 // Sources / layers
 const TRAIL_SRC = "my-trail-src";
@@ -28,9 +28,7 @@ const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
+function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 function timeAgo(ts) {
   try {
     const d = new Date(ts).getTime();
@@ -38,12 +36,10 @@ function timeAgo(ts) {
     if (diff < 60 * 1000) return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
     if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}m ago`;
     return `${Math.floor(diff / 3600000)}h ago`;
-  } catch {
-    return "";
-  }
+  } catch { return ""; }
 }
 
-// Self-contained, context-free statuses
+// Stand-alone statuses (no chat/context needed)
 const STATUSES = [
   // Low urgency / green
   { label: "Available", color: "#10b981" },
@@ -54,8 +50,7 @@ const STATUSES = [
   { label: "Battery low", color: "#f59e0b" },
   { label: "Can’t talk right now", color: "#f59e0b" },
   // High / red
-  { label: "SOS – call me", color: "#ef4444" },
-  { label: "Need assistance", color: "#ef4444" },
+  { label: "Urgent — call me", color: "#ef4444" },
 ];
 
 export default function MapComponent() {
@@ -85,7 +80,6 @@ export default function MapComponent() {
     pageOuter: {
       minHeight: "100vh",
       width: "100%",
-      // Dark navy behind the black card
       background:
         "radial-gradient(1200px 600px at 10% -10%, #1b2a4a22 30%, transparent 60%)," +
         "radial-gradient(800px 500px at 90% 0%, #2d1a1a22 20%, transparent 55%)," +
@@ -100,21 +94,13 @@ export default function MapComponent() {
       alignItems: "center",
       marginBottom: 12,
     },
-    titleWrap: {
-      display: "flex",
-      alignItems: "baseline",
-      gap: 12,
-    },
+    titleWrap: { display: "flex", alignItems: "baseline", gap: 12 },
     title: { fontSize: 24, fontWeight: 800, letterSpacing: 0.2 },
     titleSub: { fontSize: 14, opacity: 0.9 },
-    userRow: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-    },
+    userRow: { display: "flex", alignItems: "center", gap: 8 },
     tag: {
-      padding: "6px 10px",
-      borderRadius: 12,
+      padding: "8px 12px",
+      borderRadius: 10,      // same shape as buttons
       background: "#111827",
       border: "1px solid #374151",
       color: "#e5e7eb",
@@ -128,13 +114,10 @@ export default function MapComponent() {
       cursor: "pointer",
       fontWeight: 600,
       color: "#ffffff",
-      background: "#3b82f6",
+      background: "#3b82f6", // default BLUE
       boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
     },
     btnSlate: { background: "#64748b" },
-    btnGreen: { background: "#10b981" },
-    btnAmber: { background: "#f59e0b" },
-    btnRed: { background: "#ef4444" },
     topBar: {
       display: "flex",
       flexWrap: "wrap",
@@ -166,7 +149,7 @@ export default function MapComponent() {
       border: "1px solid #1f2937",
       boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
     },
-    map: { width: "100%", height: "600px" }, // taller map
+    map: { width: "100%", height: "680px" }, // taller map
     footerBar: {
       display: "flex",
       gap: 10,
@@ -203,9 +186,7 @@ export default function MapComponent() {
       try {
         const user = await getCurrentUser();
         setUsername(user?.username || "");
-      } catch {
-        setUsername("");
-      }
+      } catch { setUsername(""); }
     })();
   }, []);
 
@@ -216,9 +197,7 @@ export default function MapComponent() {
       try {
         const g = await getGroup({ groupId });
         setGroupName(g.displayName || "");
-      } catch {
-        setGroupName("");
-      }
+      } catch { setGroupName(""); }
     })();
   }, [groupId]);
 
@@ -227,11 +206,7 @@ export default function MapComponent() {
     let cancelled = false;
     (async () => {
       if (mapRef.current) return;
-      const map = await createMap({
-        container: mapDivRef.current,
-        center: DEFAULT_CENTER,
-        zoom: DEFAULT_ZOOM,
-      });
+      const map = await createMap({ container: mapDivRef.current, center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM });
       if (cancelled) return;
       mapRef.current = map;
 
@@ -244,86 +219,43 @@ export default function MapComponent() {
 
         // Empty trail
         if (!map.getSource(TRAIL_SRC)) {
-          map.addSource(TRAIL_SRC, {
-            type: "geojson",
-            data: turf.featureCollection([]),
-          });
+          map.addSource(TRAIL_SRC, { type: "geojson", data: turf.featureCollection([]) });
         }
         if (!map.getLayer(TRAIL_LAYER)) {
-          map.addLayer({
-            id: TRAIL_LAYER,
-            type: "line",
-            source: TRAIL_SRC,
-            paint: { "line-color": "#3b82f6", "line-width": 3 },
-          });
+          map.addLayer({ id: TRAIL_LAYER, type: "line", source: TRAIL_SRC, paint: { "line-color": "#3b82f6", "line-width": 3 } });
         }
 
         // Others (clustered)
         if (!map.getSource(OTHERS_SRC)) {
-          map.addSource(OTHERS_SRC, {
-            type: "geojson",
-            data: turf.featureCollection([]),
-            cluster: true,
-            clusterRadius: 40,
-          });
+          map.addSource(OTHERS_SRC, { type: "geojson", data: turf.featureCollection([]), cluster: true, clusterRadius: 40 });
         }
         if (!map.getLayer(OTHERS_LAYER_CLUSTER)) {
           map.addLayer({
-            id: OTHERS_LAYER_CLUSTER,
-            type: "circle",
-            source: OTHERS_SRC,
-            filter: ["has", "point_count"],
-            paint: {
-              "circle-color": "#334155",
-              "circle-radius": ["step", ["get", "point_count"], 16, 10, 22, 25, 28],
-              "circle-stroke-width": 1.5,
-              "circle-stroke-color": "#0f172a",
-            },
+            id: OTHERS_LAYER_CLUSTER, type: "circle", source: OTHERS_SRC, filter: ["has", "point_count"],
+            paint: { "circle-color": "#334155", "circle-radius": ["step", ["get", "point_count"], 16, 10, 22, 25, 28], "circle-stroke-width": 1.5, "circle-stroke-color": "#0f172a" },
           });
         }
         if (!map.getLayer(OTHERS_LAYER_COUNT)) {
           map.addLayer({
-            id: OTHERS_LAYER_COUNT,
-            type: "symbol",
-            source: OTHERS_SRC,
-            filter: ["has", "point_count"],
-            layout: {
-              "text-field": ["get", "point_count_abbreviated"],
-              "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
-              "text-size": 12,
-            },
+            id: OTHERS_LAYER_COUNT, type: "symbol", source: OTHERS_SRC, filter: ["has", "point_count"],
+            layout: { "text-field": ["get", "point_count_abbreviated"], "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"], "text-size": 12 },
             paint: { "text-color": "#e5e7eb" },
           });
         }
         if (!map.getLayer(OTHERS_LAYER_UNCLUSTERED)) {
           map.addLayer({
-            id: OTHERS_LAYER_UNCLUSTERED,
-            type: "circle",
-            source: OTHERS_SRC,
-            filter: ["!", ["has", "point_count"]],
+            id: OTHERS_LAYER_UNCLUSTERED, type: "circle", source: OTHERS_SRC, filter: ["!", ["has", "point_count"]],
             paint: {
               "circle-color": [
                 "case",
-                [
-                  "<",
-                  [
-                    "-",
-                    ["to-number", ["get", "nowMs"]],
-                    ["to-number", ["get", "updatedMs"]],
-                  ],
-                  ONLINE_WINDOW_MS,
-                ],
-                "#10b981",
-                "#6b7280",
+                ["<", ["-", ["to-number", ["get", "nowMs"]], ["to-number", ["get", "updatedMs"]]], ONLINE_WINDOW_MS],
+                "#10b981", "#6b7280",
               ],
-              "circle-radius": 7,
-              "circle-stroke-width": 2,
-              "circle-stroke-color": "#ffffff",
+              "circle-radius": 7, "circle-stroke-width": 2, "circle-stroke-color": "#ffffff",
             },
           });
         }
 
-        // Click cluster to zoom
         map.on("click", OTHERS_LAYER_CLUSTER, (e) => {
           const features = map.queryRenderedFeatures(e.point, { layers: [OTHERS_LAYER_CLUSTER] });
           const clusterId = features[0]?.properties?.cluster_id;
@@ -333,7 +265,6 @@ export default function MapComponent() {
           });
         });
 
-        // Click a person to show status/time
         map.on("click", OTHERS_LAYER_UNCLUSTERED, (e) => {
           const f = e.features && e.features[0];
           if (!f) return;
@@ -355,20 +286,13 @@ export default function MapComponent() {
     return () => {
       cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      if (wsRef.current) {
-        try {
-          wsRef.current.close();
-        } catch {}
-        wsRef.current = null;
-      }
+      if (wsRef.current) { try { wsRef.current.close(); } catch {} wsRef.current = null; }
       if (mapRef.current) {
         const map = mapRef.current;
         [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT].forEach(
           (id) => map.getLayer(id) && map.removeLayer(id)
         );
-        [TRAIL_SRC, OTHERS_SRC, myAccuracySrcId].forEach(
-          (id) => map.getSource(id) && map.removeSource(id)
-        );
+        [TRAIL_SRC, OTHERS_SRC, myAccuracySrcId].forEach((id) => map.getSource(id) && map.removeSource(id));
         map.remove();
         mapRef.current = null;
       }
@@ -383,14 +307,9 @@ export default function MapComponent() {
 
     if (!myMarkerRef.current) {
       const el = document.createElement("div");
-      el.style.width = "14px";
-      el.style.height = "14px";
-      el.style.borderRadius = "50%";
-      el.style.background = "#10b981"; // green
-      el.style.boxShadow = "0 0 0 2px #fff";
-      myMarkerRef.current = new maplibregl.Marker({ element: el })
-        .setLngLat([lng, lat])
-        .addTo(map);
+      el.style.width = "14px"; el.style.height = "14px"; el.style.borderRadius = "50%";
+      el.style.background = "#10b981"; el.style.boxShadow = "0 0 0 2px #fff";
+      myMarkerRef.current = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
     } else {
       myMarkerRef.current.setLngLat([lng, lat]);
     }
@@ -400,12 +319,7 @@ export default function MapComponent() {
       const circle = turf.circle([lng, lat], m / 1000, { steps: 50, units: "kilometers" });
       if (!map.getSource(myAccuracySrcId)) {
         map.addSource(myAccuracySrcId, { type: "geojson", data: circle });
-        map.addLayer({
-          id: myAccuracyLayerId,
-          type: "fill",
-          source: myAccuracySrcId,
-          paint: { "fill-color": "#10b981", "fill-opacity": 0.12 },
-        });
+        map.addLayer({ id: myAccuracyLayerId, type: "fill", source: myAccuracySrcId, paint: { "fill-color": "#10b981", "fill-opacity": 0.12 } });
       } else {
         map.getSource(myAccuracySrcId).setData(circle);
       }
@@ -538,9 +452,7 @@ export default function MapComponent() {
   const showToast = (text) => {
     const t = { id: Date.now() + Math.random(), text };
     setToasts((prev) => [...prev, t]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== t.id));
-    }, 3200);
+    setTimeout(() => { setToasts((prev) => prev.filter((x) => x.id !== t.id)); }, 3200);
   };
 
   return (
@@ -555,19 +467,20 @@ export default function MapComponent() {
         </div>
         <div style={styles.userRow}>
           {username ? <div style={styles.tag}>Signed in as <b>{username}</b></div> : null}
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={() => signOut()}>Sign out</button>
+          <button style={styles.btn} onClick={() => signOut()}>Sign out</button>
         </div>
       </div>
 
       {/* Group controls */}
       <div style={styles.topBar}>
         <input
-          placeholder="Group name (friendly)"
+          placeholder="Group name"
           value={groupName}
           onChange={(e) => setGroupName(e.target.value)}
           style={styles.input}
         />
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={handleCreateGroup}>Create</button>
+        {/* BLUE buttons for Create/Join/Invite */}
+        <button style={styles.btn} onClick={handleCreateGroup}>Create</button>
 
         <input
           placeholder="Group ID"
@@ -575,9 +488,9 @@ export default function MapComponent() {
           onChange={(e) => setGroupId(e.target.value.trim())}
           style={styles.input}
         />
-        <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={handleJoinGroup}>Join group</button>
+        <button style={styles.btn} onClick={handleJoinGroup}>Join group</button>
         <button
-          style={{ ...styles.btn, ...styles.btnSlate }}
+          style={styles.btn}
           onClick={async () => {
             if (!groupId) return;
             await navigator.clipboard.writeText(groupId);
@@ -590,11 +503,11 @@ export default function MapComponent() {
         {!isTracking ? (
           <button style={styles.btn} onClick={startTracking}>Start tracking</button>
         ) : (
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={stopTracking}>Stop tracking</button>
+          <button style={styles.btn} onClick={stopTracking}>Stop tracking</button>
         )}
       </div>
 
-      {/* Status buttons (self-contained messages) */}
+      {/* Status buttons */}
       <div style={styles.statusBar}>
         {STATUSES.map((s) => (
           <button
@@ -615,16 +528,14 @@ export default function MapComponent() {
         <div ref={mapDivRef} style={styles.map} />
         <div style={styles.footerBar}>
           <div style={styles.spacer} />
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenterSelf}>Re-center me</button>
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenterLondon}>Re-center London</button>
+          <button style={styles.btn} onClick={recenterSelf}>Re-center me</button>
+          <button style={styles.btn} onClick={recenterLondon}>Re-center London</button>
         </div>
       </div>
 
       {/* Toasts */}
       <div style={styles.toastWrap}>
-        {toasts.map((t) => (
-          <div key={t.id} style={styles.toast}>{t.text}</div>
-        ))}
+        {toasts.map((t) => (<div key={t.id} style={styles.toast}>{t.text}</div>))}
       </div>
     </div>
   );
