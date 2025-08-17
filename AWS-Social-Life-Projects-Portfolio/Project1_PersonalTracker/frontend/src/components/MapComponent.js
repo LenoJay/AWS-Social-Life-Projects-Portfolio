@@ -3,47 +3,38 @@ import maplibregl from "maplibre-gl";
 import { createMap } from "maplibre-gl-js-amplify";
 import * as turf from "@turf/turf";
 import {
+  createGroup,
+  getGroup,
+  joinGroup,
   updateLocation,
   getGroupLocations,
   setStatus,
-  joinGroup,
-  createGroup,
-  getGroup,
 } from "../api";
 import { getCurrentUser, signOut } from "@aws-amplify/auth";
 
-// Optional WebSocket push for geofence events (leave empty to disable)
-const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/";
-
-// London default
-const DEFAULT_CENTER = [-0.1276, 51.5074];
+// ----- Constants -----
+const WS_URL = ""; // optional WebSocket endpoint, leave blank to disable
+const DEFAULT_CENTER = [-0.1276, 51.5074]; // London [lng, lat]
 const DEFAULT_ZOOM = 12;
-
-// presence thresholds
 const ONLINE_WINDOW_MS = 60 * 1000;
+const ACCURACY_MIN_M = 1;  // do not render smaller than 1m
+const ACCURACY_MAX_M = 10; // clamp at 10m maximum radius
 
-// clamp accuracy circle radius (m) – wider so poor GPS shows but not a “country”
-const ACCURACY_MIN_M = 10;
-const ACCURACY_MAX_M = 2000;
-
-// layers / sources
+// Sources / layers
 const TRAIL_SRC = "my-trail-src";
 const TRAIL_LAYER = "my-trail-layer";
 const OTHERS_SRC = "others-src";
 const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
-const OTHERS_STATUS = "others-status";
-const FENCE_SRC = "fences-src";
-const FENCE_FILL = "fences-fill";
-const FENCE_LINE = "fences-line";
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 function timeAgo(ts) {
   try {
-    const diff = Date.now() - new Date(ts).getTime();
+    const d = new Date(ts).getTime();
+    const diff = Date.now() - d;
     if (diff < 60 * 1000) return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
     if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}m ago`;
     return `${Math.floor(diff / 3600000)}h ago`;
@@ -52,107 +43,104 @@ function timeAgo(ts) {
   }
 }
 
+// Self-contained, context-free statuses
+const STATUSES = [
+  // Low urgency / green
+  { label: "Available", color: "#10b981" },
+  { label: "On my way", color: "#10b981" },
+  { label: "Arrived at destination", color: "#10b981" },
+  // Medium / amber
+  { label: "Running late (~15m)", color: "#f59e0b" },
+  { label: "Battery low", color: "#f59e0b" },
+  { label: "Can’t talk right now", color: "#f59e0b" },
+  // High / red
+  { label: "SOS – call me", color: "#ef4444" },
+  { label: "Need assistance", color: "#ef4444" },
+];
+
 export default function MapComponent() {
+  // Map refs
   const mapRef = useRef(null);
   const mapDivRef = useRef(null);
   const myMarkerRef = useRef(null);
   const myLastSelfRef = useRef(null);
+
   const myAccuracySrcId = "self-accuracy-src";
   const myAccuracyLayerId = "self-accuracy-layer";
+
   const trailCoordsRef = useRef([]);
   const pollTimerRef = useRef(null);
   const wsRef = useRef(null);
 
-  const [groupId, setGroupId] = useState("");
-  const [groupName, setGroupName] = useState("");       // friendly name
-  const [newGroupName, setNewGroupName] = useState(""); // create UI
-  const [recentGroups, setRecentGroups] = useState([]); // [{id,name}]
-  const [isTracking, setIsTracking] = useState(false);
-  const [myStatusText, setMyStatusText] = useState("idle");
-  const [toasts, setToasts] = useState([]);
+  // UI state
   const [username, setUsername] = useState("");
-  const [lastAccuracy, setLastAccuracy] = useState(null); // meters
+  const [groupId, setGroupId] = useState(localStorage.getItem("pt_group") || "");
+  const [groupName, setGroupName] = useState("");
+  const [isTracking, setIsTracking] = useState(false);
+  const [myStatusText, setMyStatusText] = useState("Available");
+  const [toasts, setToasts] = useState([]);
 
-  // ---- styles
+  // ----- Styles -----
   const styles = {
     pageOuter: {
       minHeight: "100vh",
       width: "100%",
+      // Dark navy behind the black card
       background:
-        "radial-gradient(1200px 600px at 10% -10%, #1a2a6c22 30%, transparent 60%)," +
-        "radial-gradient(800px 500px at 90% 0%, #b21f1f22 20%, transparent 55%)," +
-        "linear-gradient(180deg, #0a101d 0%, #0d1426 50%, #0a101d 100%)",
+        "radial-gradient(1200px 600px at 10% -10%, #1b2a4a22 30%, transparent 60%)," +
+        "radial-gradient(800px 500px at 90% 0%, #2d1a1a22 20%, transparent 55%)," +
+        "linear-gradient(180deg, #0f1628 0%, #0b1120 50%, #0f1628 100%)",
       color: "#e5e7eb",
-      padding: 20,
+      padding: 18,
       boxSizing: "border-box",
     },
-    header: {
+    headerRow: {
       display: "flex",
       justifyContent: "space-between",
       alignItems: "center",
-      marginBottom: 14,
+      marginBottom: 12,
     },
-    title: {
-      fontSize: 24,
-      fontWeight: 800,
-      letterSpacing: 0.3,
+    titleWrap: {
+      display: "flex",
+      alignItems: "baseline",
+      gap: 12,
     },
-    subTitle: { marginTop: 4, opacity: 0.85, fontSize: 13 },
-    userBadgeWrap: { display: "flex", gap: 8, alignItems: "center" },
-    userBadge: {
-      fontSize: 13,
+    title: { fontSize: 24, fontWeight: 800, letterSpacing: 0.2 },
+    titleSub: { fontSize: 14, opacity: 0.9 },
+    userRow: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+    },
+    tag: {
       padding: "6px 10px",
-      borderRadius: 999,
+      borderRadius: 12,
       background: "#111827",
       border: "1px solid #374151",
       color: "#e5e7eb",
+      fontSize: 13,
+      lineHeight: 1,
     },
-    signOutBtn: {
-      padding: "6px 10px",
-      borderRadius: 8,
-      border: "1px solid #374151",
-      background: "#0f172a",
-      color: "#e5e7eb",
+    btn: {
+      padding: "8px 12px",
+      borderRadius: 10,
+      border: "1px solid transparent",
       cursor: "pointer",
+      fontWeight: 600,
+      color: "#ffffff",
+      background: "#3b82f6",
+      boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
     },
+    btnSlate: { background: "#64748b" },
+    btnGreen: { background: "#10b981" },
+    btnAmber: { background: "#f59e0b" },
+    btnRed: { background: "#ef4444" },
     topBar: {
       display: "flex",
       flexWrap: "wrap",
       gap: 10,
       alignItems: "center",
-      marginBottom: 6,
-    },
-    statusRow: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 10,
-      alignItems: "center",
-      marginBottom: 12,          // sits UNDER the topBar
-    },
-    chipRow: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 8,
-    },
-    chip: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      padding: "6px 10px",
-      borderRadius: 999,
-      background: "#0b1220",
-      border: "1px solid #1f2937",
-      cursor: "pointer",
-    },
-    chipX: {
-      border: "none",
-      background: "transparent",
-      color: "#9ca3af",
-      cursor: "pointer",
-      fontSize: 14,
-      padding: 0,
-      lineHeight: 1,
+      marginBottom: 10,
     },
     input: {
       padding: "8px 10px",
@@ -161,32 +149,24 @@ export default function MapComponent() {
       background: "#0f172a",
       color: "#e5e7eb",
       outline: "none",
-      minWidth: 180,
+      minWidth: 160,
     },
-    btn: {
-      padding: "8px 12px",
-      borderRadius: 8,
-      border: "1px solid transparent",
-      cursor: "pointer",
-      fontWeight: 600,
-      color: "#ffffff",
-      background: "#3b82f6",
-      boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
+    statusBar: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      alignItems: "center",
+      marginBottom: 10,
     },
-    btnGreen: { background: "#10b981" },
-    btnAmber: { background: "#f59e0b" },
-    btnRed: { background: "#ef4444" },
-    btnSlate: { background: "#64748b" },
-    statusText: { marginLeft: 8, fontWeight: 600, color: "#cbd5e1" },
     card: {
       width: "100%",
-      borderRadius: 12,
+      borderRadius: 14,
       overflow: "hidden",
       background: "#0f172a",
       border: "1px solid #1f2937",
       boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
     },
-    map: { width: "100%", height: "520px" },
+    map: { width: "100%", height: "600px" }, // taller map
     footerBar: {
       display: "flex",
       gap: 10,
@@ -194,8 +174,6 @@ export default function MapComponent() {
       padding: 10,
       borderTop: "1px solid #1f2937",
       background: "#0b1220",
-      color: "#cbd5e1",
-      fontSize: 13,
     },
     spacer: { flex: 1 },
     toastWrap: {
@@ -219,93 +197,52 @@ export default function MapComponent() {
     },
   };
 
-  // signed-in username
+  // ----- Signed-in user -----
   useEffect(() => {
     (async () => {
       try {
         const user = await getCurrentUser();
-        setUsername(user.username || "");
+        setUsername(user?.username || "");
       } catch {
         setUsername("");
       }
     })();
   }, []);
 
-  // load saved group + friendly name + recents
+  // ----- Load saved group / friendly name -----
   useEffect(() => {
-    const saved = localStorage.getItem("pt_group");
-    if (saved) {
-      setGroupId(saved);
-      (async () => {
-        try {
-          const g = await getGroup({ groupId: saved });
-          if (g?.displayName) setGroupName(g.displayName);
-        } catch {}
-      })();
-    }
-    try {
-      const raw = localStorage.getItem("pt_groups");
-      if (raw) setRecentGroups(JSON.parse(raw));
-    } catch {}
-  }, []);
+    if (!groupId) return;
+    (async () => {
+      try {
+        const g = await getGroup({ groupId });
+        setGroupName(g.displayName || "");
+      } catch {
+        setGroupName("");
+      }
+    })();
+  }, [groupId]);
 
-  // helpers: recents
-  const addRecentGroup = (id, name) => {
-    if (!id) return;
-    setRecentGroups((prev) => {
-      const filtered = prev.filter((g) => g.id !== id);
-      const updated = [{ id, name: name || "" }, ...filtered].slice(0, 8);
-      localStorage.setItem("pt_groups", JSON.stringify(updated));
-      return updated;
-    });
-  };
-  const removeRecentGroup = (id) => {
-    setRecentGroups((prev) => {
-      const updated = prev.filter((g) => g.id !== id);
-      localStorage.setItem("pt_groups", JSON.stringify(updated));
-      return updated;
-    });
-  };
-  const switchToGroup = async (id) => {
-    setGroupId(id);
-    localStorage.setItem("pt_group", id);
-    try {
-      const g = await getGroup({ groupId: id });
-      setGroupName(g?.displayName || "");
-    } catch {
-      setGroupName("");
-    }
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ action: "hello", groupId: id }));
-    }
-    showToast(`Switched to ${id}`);
-    refreshOthers();
-  };
-
-  // init map
+  // ----- Initialize map -----
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
       if (mapRef.current) return;
-
       const map = await createMap({
         container: mapDivRef.current,
         center: DEFAULT_CENTER,
         zoom: DEFAULT_ZOOM,
       });
-
       if (cancelled) return;
       mapRef.current = map;
 
-      map.on("load", async () => {
+      map.on("load", () => {
         const canvas = map.getCanvas();
         canvas.style.cursor = "grab";
         map.on("dragstart", () => (canvas.style.cursor = "grabbing"));
         map.on("dragend", () => (canvas.style.cursor = "grab"));
         setTimeout(() => map.resize(), 0);
 
-        // trail
+        // Empty trail
         if (!map.getSource(TRAIL_SRC)) {
           map.addSource(TRAIL_SRC, {
             type: "geojson",
@@ -321,7 +258,7 @@ export default function MapComponent() {
           });
         }
 
-        // others (cluster)
+        // Others (clustered)
         if (!map.getSource(OTHERS_SRC)) {
           map.addSource(OTHERS_SRC, {
             type: "geojson",
@@ -386,40 +323,17 @@ export default function MapComponent() {
           });
         }
 
-        // users' status labels
-        if (!map.getLayer(OTHERS_STATUS)) {
-          map.addLayer({
-            id: OTHERS_STATUS,
-            type: "symbol",
-            source: OTHERS_SRC,
-            filter: ["!", ["has", "point_count"]],
-            layout: {
-              "text-field": ["coalesce", ["get", "status"], ""],
-              "text-size": 11,
-              "text-anchor": "bottom",
-              "text-offset": [0, -1.2],
-            },
-            paint: {
-              "text-color": "#111111",
-              "text-halo-color": "#ffffff",
-              "text-halo-width": 1.5,
-            },
-          });
-        }
-
+        // Click cluster to zoom
         map.on("click", OTHERS_LAYER_CLUSTER, (e) => {
-          const features = map.queryRenderedFeatures(e.point, {
-            layers: [OTHERS_LAYER_CLUSTER],
+          const features = map.queryRenderedFeatures(e.point, { layers: [OTHERS_LAYER_CLUSTER] });
+          const clusterId = features[0]?.properties?.cluster_id;
+          map.getSource(OTHERS_SRC).getClusterExpansionZoom(clusterId, (err, zoom) => {
+            if (err) return;
+            map.easeTo({ center: features[0].geometry.coordinates, zoom });
           });
-          const clusterId = features[0].properties.cluster_id;
-          map
-            .getSource(OTHERS_SRC)
-            .getClusterExpansionZoom(clusterId, (err, zoom) => {
-              if (err) return;
-              map.easeTo({ center: features[0].geometry.coordinates, zoom });
-            });
         });
 
+        // Click a person to show status/time
         map.on("click", OTHERS_LAYER_UNCLUSTERED, (e) => {
           const f = e.features && e.features[0];
           if (!f) return;
@@ -430,49 +344,29 @@ export default function MapComponent() {
             .setHTML(
               `<div style="padding:6px 8px;border-radius:10px;background:#111;color:#fff;font-size:12px">
                  <div style="font-weight:700;margin-bottom:4px">${status || "No status"}</div>
-                 <div style="opacity:.8">updated ${timeAgo(updatedAt)}</div>
+                 <div style="opacity:.8">${updatedAt ? timeAgo(updatedAt) : "recent"}</div>
                </div>`
             )
             .addTo(map);
         });
-
-        // Optional fences layer
-        try {
-          const res = await fetch("/geojson/fences.geojson", { cache: "no-store" });
-          if (res.ok) {
-            const gj = await res.json();
-            if (!map.getSource(FENCE_SRC)) {
-              map.addSource(FENCE_SRC, { type: "geojson", data: gj });
-              map.addLayer({
-                id: FENCE_FILL,
-                type: "fill",
-                source: FENCE_SRC,
-                paint: { "fill-color": "#f59e0b", "fill-opacity": 0.08 },
-              });
-              map.addLayer({
-                id: FENCE_LINE,
-                type: "line",
-                source: FENCE_SRC,
-                paint: { "line-color": "#f59e0b", "line-width": 2 },
-              });
-            }
-          }
-        } catch {}
       });
     })();
 
     return () => {
+      cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       if (wsRef.current) {
-        try { wsRef.current.close(); } catch {}
+        try {
+          wsRef.current.close();
+        } catch {}
         wsRef.current = null;
       }
       if (mapRef.current) {
         const map = mapRef.current;
-        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT, OTHERS_STATUS, FENCE_FILL, FENCE_LINE].forEach(
+        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT].forEach(
           (id) => map.getLayer(id) && map.removeLayer(id)
         );
-        [TRAIL_SRC, OTHERS_SRC, FENCE_SRC, myAccuracySrcId].forEach(
+        [TRAIL_SRC, OTHERS_SRC, myAccuracySrcId].forEach(
           (id) => map.getSource(id) && map.removeSource(id)
         );
         map.remove();
@@ -481,30 +375,7 @@ export default function MapComponent() {
     };
   }, []);
 
-  // optional WebSocket for SNS -> browser geofence events
-  useEffect(() => {
-    if (!WS_URL) return;
-    if (wsRef.current) return;
-    try {
-      const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
-      ws.onopen = () => { if (groupId) ws.send(JSON.stringify({ action: "hello", groupId })); };
-      ws.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === "geofence") {
-            const t =
-              (msg.action === "ENTER" ? "Entered" : "Exited") +
-              (msg.fenceName ? ` ${msg.fenceName}` : " geofence");
-            showToast(t);
-          }
-        } catch {}
-      };
-      ws.onclose = () => (wsRef.current = null);
-    } catch { wsRef.current = null; }
-  }, [groupId]);
-
-  // render self marker + accuracy (clamped)
+  // ----- Self marker + accuracy (clamped to ≤10m) -----
   const renderSelf = (lng, lat, accuracy) => {
     const map = mapRef.current;
     if (!map) return;
@@ -515,7 +386,7 @@ export default function MapComponent() {
       el.style.width = "14px";
       el.style.height = "14px";
       el.style.borderRadius = "50%";
-      el.style.background = "#10b981";
+      el.style.background = "#10b981"; // green
       el.style.boxShadow = "0 0 0 2px #fff";
       myMarkerRef.current = new maplibregl.Marker({ element: el })
         .setLngLat([lng, lat])
@@ -525,8 +396,7 @@ export default function MapComponent() {
     }
 
     if (typeof accuracy === "number") {
-      setLastAccuracy(Math.round(accuracy));
-      const m = clamp(accuracy, ACCURACY_MIN_M, ACCURACY_MAX_M);
+      const m = clamp(Math.max(accuracy, ACCURACY_MIN_M), ACCURACY_MIN_M, ACCURACY_MAX_M);
       const circle = turf.circle([lng, lat], m / 1000, { steps: 50, units: "kilometers" });
       if (!map.getSource(myAccuracySrcId)) {
         map.addSource(myAccuracySrcId, { type: "geojson", data: circle });
@@ -552,55 +422,37 @@ export default function MapComponent() {
     else src.setData(turf.featureCollection([]));
   };
 
+  // ----- Group helpers -----
+  const handleCreateGroup = async () => {
+    try {
+      const name = groupName?.trim() || "My Group";
+      const res = await createGroup({ displayName: name });
+      if (!res?.groupId) throw new Error("No groupId returned");
+      setGroupId(res.groupId);
+      localStorage.setItem("pt_group", res.groupId);
+      setGroupName(res.displayName || name);
+      showToast(`Created “${res.displayName || name}” (code ${res.groupId})`);
+    } catch (e) {
+      console.error(e);
+      showToast("Create group error");
+    }
+  };
+
   const handleJoinGroup = async () => {
     if (!groupId) return;
     try {
       await joinGroup({ groupId });
       localStorage.setItem("pt_group", groupId);
-      showToast(`Joined group "${groupId}"`);
-      if (wsRef.current && wsRef.current.readyState === 1) {
-        wsRef.current.send(JSON.stringify({ action: "hello", groupId }));
-      }
-      try {
-        const g = await getGroup({ groupId });
-        const name = g?.displayName || "";
-        setGroupName(name);
-        addRecentGroup(groupId, name);
-      } catch {
-        addRecentGroup(groupId, "");
-      }
-      refreshOthers();
-    } catch {
-      showToast("Failed to join group");
+      const g = await getGroup({ groupId });
+      setGroupName(g.displayName || "");
+      showToast(`Joined group ${groupId}`);
+    } catch (e) {
+      console.error(e);
+      showToast("Join group failed");
     }
   };
 
-  const handleCreateGroup = async () => {
-    if (!newGroupName.trim()) { showToast("Enter a group name"); return; }
-    try {
-      const res = await createGroup({ displayName: newGroupName.trim() });
-      if (res?.groupId) {
-        setGroupId(res.groupId);
-        localStorage.setItem("pt_group", res.groupId);
-        setGroupName(res.displayName || newGroupName.trim());
-        setNewGroupName("");
-        showToast(`Created "${res.displayName}" (code: ${res.groupId})`);
-        addRecentGroup(res.groupId, res.displayName || newGroupName.trim());
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({ action: "hello", groupId: res.groupId }));
-        }
-      } else {
-        showToast("Create group failed");
-      }
-    } catch { showToast("Create group error"); }
-  };
-
-  const copyInvite = async () => {
-    if (!groupId) return;
-    try { await navigator.clipboard.writeText(groupId); showToast("Group ID copied"); }
-    catch { showToast("Copy failed"); }
-  };
-
+  // ----- Tracking -----
   const startTracking = async () => {
     setIsTracking(true);
     if (groupId) await handleJoinGroup();
@@ -614,11 +466,13 @@ export default function MapComponent() {
           trailCoordsRef.current.push([lng, lat]);
           updateTrail();
           try {
-            await updateLocation({ groupId, lat, lng, accuracy });
-          } catch (e) { console.warn("updateLocation failed", e); }
+            await updateLocation({ lat, lng, accuracy, groupId, status: myStatusText });
+          } catch (e) {
+            console.warn("updateLocation failed", e);
+          }
         },
         (err) => console.warn("getCurrentPosition error", err),
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+        { enableHighAccuracy: true }
       );
     }
 
@@ -631,13 +485,20 @@ export default function MapComponent() {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
   };
 
-  const recenter = () => {
+  // ----- Re-center -----
+  const recenterSelf = () => {
     const p = myLastSelfRef.current;
     if (mapRef.current && p) {
       mapRef.current.flyTo({ center: [p.lng, p.lat], zoom: 15, essential: true });
     }
   };
+  const recenterLondon = () => {
+    if (mapRef.current) {
+      mapRef.current.flyTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, essential: true });
+    }
+  };
 
+  // ----- Poll others -----
   const refreshOthers = async () => {
     const map = mapRef.current;
     if (!map || !groupId) return;
@@ -657,81 +518,56 @@ export default function MapComponent() {
       const fc = { type: "FeatureCollection", features };
       const src = map.getSource(OTHERS_SRC);
       if (src) src.setData(fc);
-    } catch (e) { console.warn("getGroupLocations failed", e); }
+    } catch (e) {
+      console.warn("getGroupLocations failed", e);
+    }
   };
 
+  // ----- Status -----
   const sendStatus = async (txt) => {
     setMyStatusText(txt);
-    try { await setStatus({ groupId, status: txt }); }
-    catch (e) { console.warn("setStatus failed", e); }
+    try {
+      await setStatus({ groupId, status: txt });
+      showToast(`Status set: ${txt}`);
+    } catch (e) {
+      console.warn("setStatus failed", e);
+    }
   };
 
+  // ----- Toasts -----
   const showToast = (text) => {
     const t = { id: Date.now() + Math.random(), text };
     setToasts((prev) => [...prev, t]);
-    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== t.id)), 3500);
-  };
-
-  const doSignOut = async () => {
-    try { await signOut(); } finally { window.location.reload(); }
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((x) => x.id !== t.id));
+    }, 3200);
   };
 
   return (
     <div style={styles.pageOuter}>
-      {/* Header */}
-      <div style={styles.header}>
-        <div>
-          <div style={styles.title}>
-            Real-Time Personal Tracker{groupName ? ` – ${groupName}` : ""}
+      {/* Header row */}
+      <div style={styles.headerRow}>
+        <div style={styles.titleWrap}>
+          <div style={styles.title}>Real-Time Personal Tracker</div>
+          <div style={styles.titleSub}>
+            {groupName ? `Group: ${groupName} (${groupId})` : groupId ? `Code: ${groupId}` : ""}
           </div>
-          {groupId ? <div style={styles.subTitle}>Group code: {groupId}</div> : null}
         </div>
-        {username ? (
-          <div style={styles.userBadgeWrap}>
-            <div style={styles.userBadge}>Signed in as <b>{username}</b></div>
-            <button style={styles.signOutBtn} onClick={doSignOut}>Sign out</button>
-          </div>
-        ) : null}
+        <div style={styles.userRow}>
+          {username ? <div style={styles.tag}>Signed in as <b>{username}</b></div> : null}
+          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={() => signOut()}>Sign out</button>
+        </div>
       </div>
 
-      {/* Recent groups chips */}
-      {recentGroups.length > 0 && (
-        <div style={styles.chipRow}>
-          {recentGroups.map((g) => (
-            <span
-              key={g.id}
-              style={styles.chip}
-              onClick={() => switchToGroup(g.id)}
-              title={g.name || g.id}
-            >
-              {g.name ? `${g.name} • ${g.id}` : g.id}
-              <button
-                style={styles.chipX}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeRecentGroup(g.id);
-                }}
-                aria-label="Remove group"
-                title="Remove"
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Top controls */}
+      {/* Group controls */}
       <div style={styles.topBar}>
         <input
-          placeholder="Group name"
-          value={newGroupName}
-          onChange={(e) => setNewGroupName(e.target.value)}
+          placeholder="Group name (friendly)"
+          value={groupName}
+          onChange={(e) => setGroupName(e.target.value)}
           style={styles.input}
         />
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={handleCreateGroup}>
-          Create
-        </button>
+        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={handleCreateGroup}>Create</button>
 
         <input
           placeholder="Group ID"
@@ -739,10 +575,15 @@ export default function MapComponent() {
           onChange={(e) => setGroupId(e.target.value.trim())}
           style={styles.input}
         />
-        <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={handleJoinGroup}>
-          Join group
-        </button>
-        <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={copyInvite}>
+        <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={handleJoinGroup}>Join group</button>
+        <button
+          style={{ ...styles.btn, ...styles.btnSlate }}
+          onClick={async () => {
+            if (!groupId) return;
+            await navigator.clipboard.writeText(groupId);
+            showToast("Group code copied");
+          }}
+        >
           Invite (copy code)
         </button>
 
@@ -753,26 +594,29 @@ export default function MapComponent() {
         )}
       </div>
 
-      {/* Status row (moved below) */}
-      <div style={styles.statusRow}>
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("OMW!")}>OMW!</button>
-        <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("I'm safe")}>I'm safe</button>
-        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Delayed")}>Delayed</button>
-        <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Be right back")}>BRB</button>
-        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Need help")}>Need help</button>
-        <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Emergency")}>Emergency</button>
-        <div style={styles.statusText}>Status: {myStatusText}</div>
+      {/* Status buttons (self-contained messages) */}
+      <div style={styles.statusBar}>
+        {STATUSES.map((s) => (
+          <button
+            key={s.label}
+            style={{ ...styles.btn, background: s.color }}
+            onClick={() => sendStatus(s.label)}
+          >
+            {s.label}
+          </button>
+        ))}
+        <div style={{ marginLeft: 8, fontWeight: 600, color: "#cbd5e1" }}>
+          Current: {myStatusText}
+        </div>
       </div>
 
       {/* Map card */}
       <div style={styles.card}>
         <div ref={mapDivRef} style={styles.map} />
         <div style={styles.footerBar}>
-          <div>Accuracy: {lastAccuracy != null ? `${lastAccuracy} m` : "—"}</div>
           <div style={styles.spacer} />
-          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenter}>
-            Re-center
-          </button>
+          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenterSelf}>Re-center me</button>
+          <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenterLondon}>Re-center London</button>
         </div>
       </div>
 
