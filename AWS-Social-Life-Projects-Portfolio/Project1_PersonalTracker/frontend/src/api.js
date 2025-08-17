@@ -1,6 +1,6 @@
 import { fetchAuthSession } from "@aws-amplify/auth";
 
-const BASE = "https://YOUR_API_ID.execute-api.eu-central-1.amazonaws.com/dev"; // replace with your API URL
+const BASE = "https://gogr7cxttb.execute-api.eu-central-1.amazonaws.com/dev"; // replace with your API URL
 
 async function authFetch(path, opts = {}) {
   const sess = await fetchAuthSession();
