@@ -10,7 +10,7 @@ import {
   createGroup, // ADDED
   getGroup      // ADDED
 } from "../api";
-import { getCurrentUser } from "@aws-amplify/auth";
+import { getCurrentUser, signOut } from "@aws-amplify/auth";
 
 // ---- Optional WebSocket push for geofence events ----
 const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/";
