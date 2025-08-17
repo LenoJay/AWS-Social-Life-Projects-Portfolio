@@ -10,7 +10,7 @@ import {
   getGroupLocations,
   setStatus,
 } from "../api";
-import { getCurrentUser, signOut } from "@aws-amplify/auth";
+import { getCurrentUser } from "@aws-amplify/auth";
 
 // ----- Constants -----
 const WS_URL = ""; // optional WebSocket endpoint, leave blank to disable
@@ -49,7 +49,7 @@ const STATUSES = [
   { label: "Running late (~15m)", color: "#f59e0b" },
   { label: "Battery low", color: "#f59e0b" },
   { label: "Can’t talk right now", color: "#f59e0b" },
-  // High / red
+  // High / red (single urgent message)
   { label: "Urgent — call me", color: "#ef4444" },
 ];
 
@@ -97,27 +97,22 @@ export default function MapComponent() {
     titleWrap: { display: "flex", alignItems: "baseline", gap: 12 },
     title: { fontSize: 24, fontWeight: 800, letterSpacing: 0.2 },
     titleSub: { fontSize: 14, opacity: 0.9 },
-    userRow: { display: "flex", alignItems: "center", gap: 8 },
-    tag: {
-      padding: "8px 12px",
-      borderRadius: 10,      // same shape as buttons
-      background: "#111827",
-      border: "1px solid #374151",
-      color: "#e5e7eb",
-      fontSize: 13,
-      lineHeight: 1,
-    },
-    btn: {
+    // unified button base
+    btnBase: {
       padding: "8px 12px",
       borderRadius: 10,
       border: "1px solid transparent",
       cursor: "pointer",
       fontWeight: 600,
       color: "#ffffff",
-      background: "#3b82f6", // default BLUE
       boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
     },
-    btnSlate: { background: "#64748b" },
+    // colors
+    btnBlue:   { background: "#3b82f6" }, // Create (lighter blue)
+    btnBlueDk: { background: "#1e40af" }, // Join / Invite (darker blue)
+    btnGreen:  { background: "#10b981" }, // Start tracking (green)
+    btnRed:    { background: "#ef4444" }, // Stop tracking (red)
+    btnSlate:  { background: "#64748b" },
     topBar: {
       display: "flex",
       flexWrap: "wrap",
@@ -180,7 +175,7 @@ export default function MapComponent() {
     },
   };
 
-  // ----- Signed-in user -----
+  // ----- Signed-in user (kept for future, not shown in header now) -----
   useEffect(() => {
     (async () => {
       try {
@@ -427,6 +422,8 @@ export default function MapComponent() {
           updatedAt: u.updatedAt || "",
           updatedMs: u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
           nowMs: Date.now(),
+          // If your API returns a username, show it; otherwise userId will be visible.
+          username: u.username || "",
         },
       }));
       const fc = { type: "FeatureCollection", features };
@@ -465,10 +462,8 @@ export default function MapComponent() {
             {groupName ? `Group: ${groupName} (${groupId})` : groupId ? `Code: ${groupId}` : ""}
           </div>
         </div>
-        <div style={styles.userRow}>
-          {username ? <div style={styles.tag}>Signed in as <b>{username}</b></div> : null}
-          <button style={styles.btn} onClick={() => signOut()}>Sign out</button>
-        </div>
+        {/* Intentionally empty right side (you keep the Amplify white banner Sign Out) */}
+        <div />
       </div>
 
       {/* Group controls */}
@@ -479,8 +474,8 @@ export default function MapComponent() {
           onChange={(e) => setGroupName(e.target.value)}
           style={styles.input}
         />
-        {/* BLUE buttons for Create/Join/Invite */}
-        <button style={styles.btn} onClick={handleCreateGroup}>Create</button>
+        {/* Create = lighter blue */}
+        <button style={{ ...styles.btnBase, ...styles.btnBlue }} onClick={handleCreateGroup}>Create</button>
 
         <input
           placeholder="Group ID"
@@ -488,9 +483,10 @@ export default function MapComponent() {
           onChange={(e) => setGroupId(e.target.value.trim())}
           style={styles.input}
         />
-        <button style={styles.btn} onClick={handleJoinGroup}>Join group</button>
+        {/* Join/Invite = darker blue */}
+        <button style={{ ...styles.btnBase, ...styles.btnBlueDk }} onClick={handleJoinGroup}>Join group</button>
         <button
-          style={styles.btn}
+          style={{ ...styles.btnBase, ...styles.btnBlueDk }}
           onClick={async () => {
             if (!groupId) return;
             await navigator.clipboard.writeText(groupId);
@@ -500,10 +496,11 @@ export default function MapComponent() {
           Invite (copy code)
         </button>
 
+        {/* Start/Stop tracking: green/red */}
         {!isTracking ? (
-          <button style={styles.btn} onClick={startTracking}>Start tracking</button>
+          <button style={{ ...styles.btnBase, ...styles.btnGreen }} onClick={startTracking}>Start tracking</button>
         ) : (
-          <button style={styles.btn} onClick={stopTracking}>Stop tracking</button>
+          <button style={{ ...styles.btnBase, ...styles.btnRed }} onClick={stopTracking}>Stop tracking</button>
         )}
       </div>
 
@@ -512,7 +509,7 @@ export default function MapComponent() {
         {STATUSES.map((s) => (
           <button
             key={s.label}
-            style={{ ...styles.btn, background: s.color }}
+            style={{ ...styles.btnBase, background: s.color }}
             onClick={() => sendStatus(s.label)}
           >
             {s.label}
@@ -528,8 +525,8 @@ export default function MapComponent() {
         <div ref={mapDivRef} style={styles.map} />
         <div style={styles.footerBar}>
           <div style={styles.spacer} />
-          <button style={styles.btn} onClick={recenterSelf}>Re-center me</button>
-          <button style={styles.btn} onClick={recenterLondon}>Re-center London</button>
+          <button style={{ ...styles.btnBase, ...styles.btnSlate }} onClick={recenterSelf}>Re-center me</button>
+          <button style={{ ...styles.btnBase, ...styles.btnSlate }} onClick={recenterLondon}>Re-center London</button>
         </div>
       </div>
 
