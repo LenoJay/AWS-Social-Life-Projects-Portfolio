@@ -7,12 +7,12 @@ import {
   getGroupLocations,
   setStatus,
   joinGroup,
-  createGroup, // ADDED
-  getGroup      // ADDED
+  createGroup,
+  getGroup,
 } from "../api";
 import { getCurrentUser, signOut } from "@aws-amplify/auth";
 
-// ---- Optional WebSocket push for geofence events ----
+// Optional WebSocket push for geofence events (leave empty to disable)
 const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/";
 
 // London default
@@ -22,7 +22,7 @@ const DEFAULT_ZOOM = 12;
 // presence thresholds
 const ONLINE_WINDOW_MS = 60 * 1000;
 
-// clamp accuracy circle radius (in meters) — widened so poor accuracy is visible
+// clamp accuracy circle radius (m) – wider so poor GPS shows but not a “country”
 const ACCURACY_MIN_M = 10;
 const ACCURACY_MAX_M = 2000;
 
@@ -33,7 +33,7 @@ const OTHERS_SRC = "others-src";
 const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
-const OTHERS_STATUS = "others-status"; // ADDED
+const OTHERS_STATUS = "others-status";
 const FENCE_SRC = "fences-src";
 const FENCE_FILL = "fences-fill";
 const FENCE_LINE = "fences-line";
@@ -98,6 +98,7 @@ export default function MapComponent() {
       letterSpacing: 0.3,
     },
     subTitle: { marginTop: 4, opacity: 0.85, fontSize: 13 },
+    userBadgeWrap: { display: "flex", gap: 8, alignItems: "center" },
     userBadge: {
       fontSize: 13,
       padding: "6px 10px",
@@ -106,12 +107,27 @@ export default function MapComponent() {
       border: "1px solid #374151",
       color: "#e5e7eb",
     },
+    signOutBtn: {
+      padding: "6px 10px",
+      borderRadius: 8,
+      border: "1px solid #374151",
+      background: "#0f172a",
+      color: "#e5e7eb",
+      cursor: "pointer",
+    },
     topBar: {
       display: "flex",
       flexWrap: "wrap",
       gap: 10,
       alignItems: "center",
-      marginBottom: 12,
+      marginBottom: 6,
+    },
+    statusRow: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 10,
+      alignItems: "center",
+      marginBottom: 12,          // sits UNDER the topBar
     },
     chipRow: {
       display: "flex",
@@ -215,7 +231,7 @@ export default function MapComponent() {
     })();
   }, []);
 
-  // load saved group + friendly name + recent groups
+  // load saved group + friendly name + recents
   useEffect(() => {
     const saved = localStorage.getItem("pt_group");
     if (saved) {
@@ -233,7 +249,7 @@ export default function MapComponent() {
     } catch {}
   }, []);
 
-  // helper: save recent groups
+  // helpers: recents
   const addRecentGroup = (id, name) => {
     if (!id) return;
     setRecentGroups((prev) => {
@@ -370,7 +386,7 @@ export default function MapComponent() {
           });
         }
 
-        // ADDED: show each user's status above their marker
+        // users' status labels
         if (!map.getLayer(OTHERS_STATUS)) {
           map.addLayer({
             id: OTHERS_STATUS,
@@ -420,7 +436,7 @@ export default function MapComponent() {
             .addTo(map);
         });
 
-        // Optional: fences layer if you provide /public/geojson/fences.geojson
+        // Optional fences layer
         try {
           const res = await fetch("/geojson/fences.geojson", { cache: "no-store" });
           if (res.ok) {
@@ -446,12 +462,9 @@ export default function MapComponent() {
     })();
 
     return () => {
-      cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       if (wsRef.current) {
-        try {
-          wsRef.current.close();
-        } catch {}
+        try { wsRef.current.close(); } catch {}
         wsRef.current = null;
       }
       if (mapRef.current) {
@@ -468,19 +481,14 @@ export default function MapComponent() {
     };
   }, []);
 
-  // ---- optional WebSocket for SNS -> browser geofence events
+  // optional WebSocket for SNS -> browser geofence events
   useEffect(() => {
-    if (!WS_URL) return; // disabled
+    if (!WS_URL) return;
     if (wsRef.current) return;
     try {
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
-
-      ws.onopen = () => {
-        if (groupId) {
-          ws.send(JSON.stringify({ action: "hello", groupId }));
-        }
-      };
+      ws.onopen = () => { if (groupId) ws.send(JSON.stringify({ action: "hello", groupId })); };
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
@@ -492,12 +500,8 @@ export default function MapComponent() {
           }
         } catch {}
       };
-      ws.onclose = () => {
-        wsRef.current = null;
-      };
-    } catch {
-      wsRef.current = null;
-    }
+      ws.onclose = () => (wsRef.current = null);
+    } catch { wsRef.current = null; }
   }, [groupId]);
 
   // render self marker + accuracy (clamped)
@@ -521,12 +525,9 @@ export default function MapComponent() {
     }
 
     if (typeof accuracy === "number") {
-      setLastAccuracy(Math.round(accuracy)); // show in footer
+      setLastAccuracy(Math.round(accuracy));
       const m = clamp(accuracy, ACCURACY_MIN_M, ACCURACY_MAX_M);
-      const circle = turf.circle([lng, lat], m / 1000, {
-        steps: 50,
-        units: "kilometers",
-      });
+      const circle = turf.circle([lng, lat], m / 1000, { steps: 50, units: "kilometers" });
       if (!map.getSource(myAccuracySrcId)) {
         map.addSource(myAccuracySrcId, { type: "geojson", data: circle });
         map.addLayer({
@@ -560,7 +561,6 @@ export default function MapComponent() {
       if (wsRef.current && wsRef.current.readyState === 1) {
         wsRef.current.send(JSON.stringify({ action: "hello", groupId }));
       }
-      // refresh friendly name & save in recents
       try {
         const g = await getGroup({ groupId });
         const name = g?.displayName || "";
@@ -575,18 +575,14 @@ export default function MapComponent() {
     }
   };
 
-  // Create group (friendly name -> code) + keep in recents
   const handleCreateGroup = async () => {
-    if (!newGroupName.trim()) {
-      showToast("Enter a group name");
-      return;
-    }
+    if (!newGroupName.trim()) { showToast("Enter a group name"); return; }
     try {
       const res = await createGroup({ displayName: newGroupName.trim() });
       if (res?.groupId) {
         setGroupId(res.groupId);
         localStorage.setItem("pt_group", res.groupId);
-        setGroupName(newGroupName.trim());
+        setGroupName(res.displayName || newGroupName.trim());
         setNewGroupName("");
         showToast(`Created "${res.displayName}" (code: ${res.groupId})`);
         addRecentGroup(res.groupId, res.displayName || newGroupName.trim());
@@ -596,19 +592,13 @@ export default function MapComponent() {
       } else {
         showToast("Create group failed");
       }
-    } catch (e) {
-      showToast("Create group error");
-    }
+    } catch { showToast("Create group error"); }
   };
 
   const copyInvite = async () => {
     if (!groupId) return;
-    try {
-      await navigator.clipboard.writeText(groupId);
-      showToast("Group ID copied to clipboard");
-    } catch {
-      showToast("Copy failed");
-    }
+    try { await navigator.clipboard.writeText(groupId); showToast("Group ID copied"); }
+    catch { showToast("Copy failed"); }
   };
 
   const startTracking = async () => {
@@ -625,9 +615,7 @@ export default function MapComponent() {
           updateTrail();
           try {
             await updateLocation({ groupId, lat, lng, accuracy });
-          } catch (e) {
-            console.warn("updateLocation failed", e);
-          }
+          } catch (e) { console.warn("updateLocation failed", e); }
         },
         (err) => console.warn("getCurrentPosition error", err),
         { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
@@ -669,26 +657,23 @@ export default function MapComponent() {
       const fc = { type: "FeatureCollection", features };
       const src = map.getSource(OTHERS_SRC);
       if (src) src.setData(fc);
-    } catch (e) {
-      console.warn("getGroupLocations failed", e);
-    }
+    } catch (e) { console.warn("getGroupLocations failed", e); }
   };
 
   const sendStatus = async (txt) => {
     setMyStatusText(txt);
-    try {
-      await setStatus({ groupId, status: txt });
-    } catch (e) {
-      console.warn("setStatus failed", e);
-    }
+    try { await setStatus({ groupId, status: txt }); }
+    catch (e) { console.warn("setStatus failed", e); }
   };
 
   const showToast = (text) => {
     const t = { id: Date.now() + Math.random(), text };
     setToasts((prev) => [...prev, t]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== t.id));
-    }, 3500);
+    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== t.id)), 3500);
+  };
+
+  const doSignOut = async () => {
+    try { await signOut(); } finally { window.location.reload(); }
   };
 
   return (
@@ -701,7 +686,12 @@ export default function MapComponent() {
           </div>
           {groupId ? <div style={styles.subTitle}>Group code: {groupId}</div> : null}
         </div>
-        {username ? <div style={styles.userBadge}>Signed in as <b>{username}</b></div> : null}
+        {username ? (
+          <div style={styles.userBadgeWrap}>
+            <div style={styles.userBadge}>Signed in as <b>{username}</b></div>
+            <button style={styles.signOutBtn} onClick={doSignOut}>Sign out</button>
+          </div>
+        ) : null}
       </div>
 
       {/* Recent groups chips */}
@@ -731,9 +721,8 @@ export default function MapComponent() {
         </div>
       )}
 
-      {/* Controls */}
+      {/* Top controls */}
       <div style={styles.topBar}>
-        {/* Create Group (friendly name -> code) */}
         <input
           placeholder="Group name"
           value={newGroupName}
@@ -744,7 +733,6 @@ export default function MapComponent() {
           Create
         </button>
 
-        {/* Join by code */}
         <input
           placeholder="Group ID"
           value={groupId}
@@ -763,14 +751,16 @@ export default function MapComponent() {
         ) : (
           <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={stopTracking}>Stop tracking</button>
         )}
+      </div>
 
+      {/* Status row (moved below) */}
+      <div style={styles.statusRow}>
         <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("OMW!")}>OMW!</button>
         <button style={{ ...styles.btn, ...styles.btnGreen }} onClick={() => sendStatus("I'm safe")}>I'm safe</button>
         <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Delayed")}>Delayed</button>
         <button style={{ ...styles.btn, ...styles.btnAmber }} onClick={() => sendStatus("Be right back")}>BRB</button>
         <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Need help")}>Need help</button>
         <button style={{ ...styles.btn, ...styles.btnRed }} onClick={() => sendStatus("Emergency")}>Emergency</button>
-
         <div style={styles.statusText}>Status: {myStatusText}</div>
       </div>
 
