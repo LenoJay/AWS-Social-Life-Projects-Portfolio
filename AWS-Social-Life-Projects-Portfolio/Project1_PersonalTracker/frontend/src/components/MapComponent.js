@@ -13,9 +13,7 @@ import {
 import { getCurrentUser } from "@aws-amplify/auth";
 
 // ---- Optional WebSocket push for geofence events ----
-// If you later create a WebSocket API (see guide below), put its wss URL here.
-// Leave as "" to disable gracefully.
-const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/"; // e.g. "wss://abc123.execute-api.eu-central-1.amazonaws.com/prod"
+const WS_URL = "wss://ed5ifhavha.execute-api.eu-central-1.amazonaws.com/prod/";
 
 // London default
 const DEFAULT_CENTER = [-0.1276, 51.5074];
@@ -24,9 +22,9 @@ const DEFAULT_ZOOM = 12;
 // presence thresholds
 const ONLINE_WINDOW_MS = 60 * 1000;
 
-// clamp accuracy circle radius (in meters)
+// clamp accuracy circle radius (in meters) — widened so poor accuracy is visible
 const ACCURACY_MIN_M = 10;
-const ACCURACY_MAX_M = 150;
+const ACCURACY_MAX_M = 2000;
 
 // layers / sources
 const TRAIL_SRC = "my-trail-src";
@@ -35,6 +33,7 @@ const OTHERS_SRC = "others-src";
 const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
+const OTHERS_STATUS = "others-status"; // ADDED
 const FENCE_SRC = "fences-src";
 const FENCE_FILL = "fences-fill";
 const FENCE_LINE = "fences-line";
@@ -65,19 +64,20 @@ export default function MapComponent() {
   const wsRef = useRef(null);
 
   const [groupId, setGroupId] = useState("");
-  const [groupName, setGroupName] = useState("");       // ADDED (friendly name)
-  const [newGroupName, setNewGroupName] = useState(""); // ADDED (create UI)
+  const [groupName, setGroupName] = useState("");       // friendly name
+  const [newGroupName, setNewGroupName] = useState(""); // create UI
+  const [recentGroups, setRecentGroups] = useState([]); // [{id,name}]
   const [isTracking, setIsTracking] = useState(false);
   const [myStatusText, setMyStatusText] = useState("idle");
   const [toasts, setToasts] = useState([]);
   const [username, setUsername] = useState("");
+  const [lastAccuracy, setLastAccuracy] = useState(null); // meters
 
   // ---- styles
   const styles = {
     pageOuter: {
       minHeight: "100vh",
       width: "100%",
-      // layered background: deep blue base + radial glow
       background:
         "radial-gradient(1200px 600px at 10% -10%, #1a2a6c22 30%, transparent 60%)," +
         "radial-gradient(800px 500px at 90% 0%, #b21f1f22 20%, transparent 55%)," +
@@ -97,7 +97,7 @@ export default function MapComponent() {
       fontWeight: 800,
       letterSpacing: 0.3,
     },
-    subTitle: { marginTop: 4, opacity: 0.85, fontSize: 13 }, // ADDED
+    subTitle: { marginTop: 4, opacity: 0.85, fontSize: 13 },
     userBadge: {
       fontSize: 13,
       padding: "6px 10px",
@@ -112,6 +112,31 @@ export default function MapComponent() {
       gap: 10,
       alignItems: "center",
       marginBottom: 12,
+    },
+    chipRow: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 8,
+    },
+    chip: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6,
+      padding: "6px 10px",
+      borderRadius: 999,
+      background: "#0b1220",
+      border: "1px solid #1f2937",
+      cursor: "pointer",
+    },
+    chipX: {
+      border: "none",
+      background: "transparent",
+      color: "#9ca3af",
+      cursor: "pointer",
+      fontSize: 14,
+      padding: 0,
+      lineHeight: 1,
     },
     input: {
       padding: "8px 10px",
@@ -153,6 +178,8 @@ export default function MapComponent() {
       padding: 10,
       borderTop: "1px solid #1f2937",
       background: "#0b1220",
+      color: "#cbd5e1",
+      fontSize: 13,
     },
     spacer: { flex: 1 },
     toastWrap: {
@@ -188,12 +215,11 @@ export default function MapComponent() {
     })();
   }, []);
 
-  // load saved group + fetch friendly name
+  // load saved group + friendly name + recent groups
   useEffect(() => {
     const saved = localStorage.getItem("pt_group");
     if (saved) {
       setGroupId(saved);
-      // fetch friendly name
       (async () => {
         try {
           const g = await getGroup({ groupId: saved });
@@ -201,7 +227,44 @@ export default function MapComponent() {
         } catch {}
       })();
     }
+    try {
+      const raw = localStorage.getItem("pt_groups");
+      if (raw) setRecentGroups(JSON.parse(raw));
+    } catch {}
   }, []);
+
+  // helper: save recent groups
+  const addRecentGroup = (id, name) => {
+    if (!id) return;
+    setRecentGroups((prev) => {
+      const filtered = prev.filter((g) => g.id !== id);
+      const updated = [{ id, name: name || "" }, ...filtered].slice(0, 8);
+      localStorage.setItem("pt_groups", JSON.stringify(updated));
+      return updated;
+    });
+  };
+  const removeRecentGroup = (id) => {
+    setRecentGroups((prev) => {
+      const updated = prev.filter((g) => g.id !== id);
+      localStorage.setItem("pt_groups", JSON.stringify(updated));
+      return updated;
+    });
+  };
+  const switchToGroup = async (id) => {
+    setGroupId(id);
+    localStorage.setItem("pt_group", id);
+    try {
+      const g = await getGroup({ groupId: id });
+      setGroupName(g?.displayName || "");
+    } catch {
+      setGroupName("");
+    }
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ action: "hello", groupId: id }));
+    }
+    showToast(`Switched to ${id}`);
+    refreshOthers();
+  };
 
   // init map
   useEffect(() => {
@@ -307,6 +370,27 @@ export default function MapComponent() {
           });
         }
 
+        // ADDED: show each user's status above their marker
+        if (!map.getLayer(OTHERS_STATUS)) {
+          map.addLayer({
+            id: OTHERS_STATUS,
+            type: "symbol",
+            source: OTHERS_SRC,
+            filter: ["!", ["has", "point_count"]],
+            layout: {
+              "text-field": ["coalesce", ["get", "status"], ""],
+              "text-size": 11,
+              "text-anchor": "bottom",
+              "text-offset": [0, -1.2],
+            },
+            paint: {
+              "text-color": "#111111",
+              "text-halo-color": "#ffffff",
+              "text-halo-width": 1.5,
+            },
+          });
+        }
+
         map.on("click", OTHERS_LAYER_CLUSTER, (e) => {
           const features = map.queryRenderedFeatures(e.point, {
             layers: [OTHERS_LAYER_CLUSTER],
@@ -372,7 +456,7 @@ export default function MapComponent() {
       }
       if (mapRef.current) {
         const map = mapRef.current;
-        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT, FENCE_FILL, FENCE_LINE].forEach(
+        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT, OTHERS_STATUS, FENCE_FILL, FENCE_LINE].forEach(
           (id) => map.getLayer(id) && map.removeLayer(id)
         );
         [TRAIL_SRC, OTHERS_SRC, FENCE_SRC, myAccuracySrcId].forEach(
@@ -393,7 +477,6 @@ export default function MapComponent() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        // Optionally send a hello that includes the current group (if your $connect Lambda needs it)
         if (groupId) {
           ws.send(JSON.stringify({ action: "hello", groupId }));
         }
@@ -401,8 +484,6 @@ export default function MapComponent() {
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
-          // Expected message shape from your broadcaster Lambda:
-          // { type: "geofence", action: "ENTER"|"EXIT", fenceId, fenceName, at }
           if (msg.type === "geofence") {
             const t =
               (msg.action === "ENTER" ? "Entered" : "Exited") +
@@ -419,7 +500,7 @@ export default function MapComponent() {
     }
   }, [groupId]);
 
-  // render self marker + accuracy (clamped small)
+  // render self marker + accuracy (clamped)
   const renderSelf = (lng, lat, accuracy) => {
     const map = mapRef.current;
     if (!map) return;
@@ -440,6 +521,7 @@ export default function MapComponent() {
     }
 
     if (typeof accuracy === "number") {
+      setLastAccuracy(Math.round(accuracy)); // show in footer
       const m = clamp(accuracy, ACCURACY_MIN_M, ACCURACY_MAX_M);
       const circle = turf.circle([lng, lat], m / 1000, {
         steps: 50,
@@ -475,21 +557,25 @@ export default function MapComponent() {
       await joinGroup({ groupId });
       localStorage.setItem("pt_group", groupId);
       showToast(`Joined group "${groupId}"`);
-      // inform WS (if open) of new group
       if (wsRef.current && wsRef.current.readyState === 1) {
         wsRef.current.send(JSON.stringify({ action: "hello", groupId }));
       }
-      // refresh friendly name
+      // refresh friendly name & save in recents
       try {
         const g = await getGroup({ groupId });
-        if (g?.displayName) setGroupName(g.displayName);
-      } catch {}
+        const name = g?.displayName || "";
+        setGroupName(name);
+        addRecentGroup(groupId, name);
+      } catch {
+        addRecentGroup(groupId, "");
+      }
+      refreshOthers();
     } catch {
       showToast("Failed to join group");
     }
   };
 
-  // ADDED: create group (Minimal UI 7.2)
+  // Create group (friendly name -> code) + keep in recents
   const handleCreateGroup = async () => {
     if (!newGroupName.trim()) {
       showToast("Enter a group name");
@@ -503,7 +589,7 @@ export default function MapComponent() {
         setGroupName(newGroupName.trim());
         setNewGroupName("");
         showToast(`Created "${res.displayName}" (code: ${res.groupId})`);
-        // notify WS
+        addRecentGroup(res.groupId, res.displayName || newGroupName.trim());
         if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(JSON.stringify({ action: "hello", groupId: res.groupId }));
         }
@@ -538,14 +624,13 @@ export default function MapComponent() {
           trailCoordsRef.current.push([lng, lat]);
           updateTrail();
           try {
-            // ADDED: pass groupId + accuracy
             await updateLocation({ groupId, lat, lng, accuracy });
           } catch (e) {
             console.warn("updateLocation failed", e);
           }
         },
         (err) => console.warn("getCurrentPosition error", err),
-        { enableHighAccuracy: true }
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
       );
     }
 
@@ -614,15 +699,41 @@ export default function MapComponent() {
           <div style={styles.title}>
             Real-Time Personal Tracker{groupName ? ` – ${groupName}` : ""}
           </div>
-          {/* optional subtitle if you want to show code too */}
           {groupId ? <div style={styles.subTitle}>Group code: {groupId}</div> : null}
         </div>
         {username ? <div style={styles.userBadge}>Signed in as <b>{username}</b></div> : null}
       </div>
 
+      {/* Recent groups chips */}
+      {recentGroups.length > 0 && (
+        <div style={styles.chipRow}>
+          {recentGroups.map((g) => (
+            <span
+              key={g.id}
+              style={styles.chip}
+              onClick={() => switchToGroup(g.id)}
+              title={g.name || g.id}
+            >
+              {g.name ? `${g.name} • ${g.id}` : g.id}
+              <button
+                style={styles.chipX}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeRecentGroup(g.id);
+                }}
+                aria-label="Remove group"
+                title="Remove"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Controls */}
       <div style={styles.topBar}>
-        {/* NEW: Create Group (friendly name -> code) */}
+        {/* Create Group (friendly name -> code) */}
         <input
           placeholder="Group name"
           value={newGroupName}
@@ -633,7 +744,7 @@ export default function MapComponent() {
           Create
         </button>
 
-        {/* Existing: join by code */}
+        {/* Join by code */}
         <input
           placeholder="Group ID"
           value={groupId}
@@ -667,6 +778,7 @@ export default function MapComponent() {
       <div style={styles.card}>
         <div ref={mapDivRef} style={styles.map} />
         <div style={styles.footerBar}>
+          <div>Accuracy: {lastAccuracy != null ? `${lastAccuracy} m` : "—"}</div>
           <div style={styles.spacer} />
           <button style={{ ...styles.btn, ...styles.btnSlate }} onClick={recenter}>
             Re-center
