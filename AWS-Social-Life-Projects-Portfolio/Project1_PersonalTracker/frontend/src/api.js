@@ -18,7 +18,7 @@ async function authFetch(path, opts = {}) {
 
 // --- NEW: Create a group ---
 export function createGroup({ displayName }) {
-  return authFetch("/create-group", {
+  return authFetch("/CreateGroup", {
     method: "POST",
     body: JSON.stringify({ displayName }),
   });

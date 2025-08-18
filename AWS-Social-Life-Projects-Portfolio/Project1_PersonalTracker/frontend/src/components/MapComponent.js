@@ -27,6 +27,7 @@ const OTHERS_SRC = "others-src";
 const OTHERS_LAYER_UNCLUSTERED = "others-unclustered";
 const OTHERS_LAYER_CLUSTER = "others-clusters";
 const OTHERS_LAYER_COUNT = "cluster-count";
+const OTHERS_LAYER_LABELS = "others-labels"; // NEW: always-on usernames
 
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 function timeAgo(ts) {
@@ -52,6 +53,21 @@ const STATUSES = [
   // High / red (single urgent message)
   { label: "Urgent — call me", color: "#ef4444" },
 ];
+
+// ---- Distinct colours per user (stable mapping) ----
+const PALETTE = ["#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#a855f7", "#f59e0b", "#14b8a6", "#ec4899"]; // red, blue, green, amber, purple, orange(gold), teal, pink
+function hashString(s) {
+  let h = 2166136261 >>> 0; // FNV-1a base
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function colorForUser(userIdOrName = "") {
+  const h = hashString(userIdOrName);
+  return PALETTE[h % PALETTE.length];
+}
 
 export default function MapComponent() {
   // Map refs
@@ -241,12 +257,33 @@ export default function MapComponent() {
           map.addLayer({
             id: OTHERS_LAYER_UNCLUSTERED, type: "circle", source: OTHERS_SRC, filter: ["!", ["has", "point_count"]],
             paint: {
-              "circle-color": [
-                "case",
-                ["<", ["-", ["to-number", ["get", "nowMs"]], ["to-number", ["get", "updatedMs"]]], ONLINE_WINDOW_MS],
-                "#10b981", "#6b7280",
-              ],
-              "circle-radius": 7, "circle-stroke-width": 2, "circle-stroke-color": "#ffffff",
+              // color now comes from feature property "color"
+              "circle-color": ["coalesce", ["get", "color"], "#6b7280"],
+              "circle-radius": 7,
+              "circle-stroke-width": 2,
+              "circle-stroke-color": "#ffffff",
+            },
+          });
+        }
+        // NEW: Always-on username labels above unclustered points
+        if (!map.getLayer(OTHERS_LAYER_LABELS)) {
+          map.addLayer({
+            id: OTHERS_LAYER_LABELS,
+            type: "symbol",
+            source: OTHERS_SRC,
+            filter: ["!", ["has", "point_count"]],
+            layout: {
+              "text-field": ["coalesce", ["get", "username"], ["get", "userId"]],
+              "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+              "text-size": 12,
+              "text-offset": [0, -1.2],          // slightly above the circle
+              "text-anchor": "bottom",
+              "text-allow-overlap": true,        // keep labels visible even when close
+            },
+            paint: {
+              "text-color": "#e5e7eb",
+              "text-halo-color": "#0f172a",
+              "text-halo-width": 1.2,
             },
           });
         }
@@ -263,13 +300,14 @@ export default function MapComponent() {
         map.on("click", OTHERS_LAYER_UNCLUSTERED, (e) => {
           const f = e.features && e.features[0];
           if (!f) return;
-          const { status = "", updatedAt = "" } = f.properties || {};
+          const { status = "", updatedAt = "", username: uname = "" } = f.properties || {};
           const coords = f.geometry.coordinates.slice();
           new maplibregl.Popup({ closeOnClick: true })
             .setLngLat(coords)
             .setHTML(
               `<div style="padding:6px 8px;border-radius:10px;background:#111;color:#fff;font-size:12px">
-                 <div style="font-weight:700;margin-bottom:4px">${status || "No status"}</div>
+                 <div style="font-weight:700;margin-bottom:4px">${uname || "User"}</div>
+                 <div style="margin-bottom:4px">${status || "No status"}</div>
                  <div style="opacity:.8">${updatedAt ? timeAgo(updatedAt) : "recent"}</div>
                </div>`
             )
@@ -279,12 +317,12 @@ export default function MapComponent() {
     })();
 
     return () => {
-      cancelled = true;
+      let cancelled = true;
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       if (wsRef.current) { try { wsRef.current.close(); } catch {} wsRef.current = null; }
       if (mapRef.current) {
         const map = mapRef.current;
-        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT].forEach(
+        [TRAIL_LAYER, OTHERS_LAYER_UNCLUSTERED, OTHERS_LAYER_CLUSTER, OTHERS_LAYER_COUNT, OTHERS_LAYER_LABELS].forEach(
           (id) => map.getLayer(id) && map.removeLayer(id)
         );
         [TRAIL_SRC, OTHERS_SRC, myAccuracySrcId].forEach((id) => map.getSource(id) && map.removeSource(id));
@@ -413,19 +451,22 @@ export default function MapComponent() {
     if (!map || !groupId) return;
     try {
       const data = await getGroupLocations({ groupId });
-      const features = (data.items || []).map((u) => ({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [u.lng, u.lat] },
-        properties: {
-          userId: u.userId,
-          status: u.status || "",
-          updatedAt: u.updatedAt || "",
-          updatedMs: u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
-          nowMs: Date.now(),
-          // If your API returns a username, show it; otherwise userId will be visible.
-          username: u.username || "",
-        },
-      }));
+      const features = (data.items || []).map((u) => {
+        const label = u.username || u.userId || "";
+        return {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [u.lng, u.lat] },
+          properties: {
+            userId: u.userId,
+            username: u.username || "",
+            status: u.status || "",
+            updatedAt: u.updatedAt || "",
+            updatedMs: u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
+            nowMs: Date.now(),
+            color: colorForUser(label), // NEW: stable colour per user
+          },
+        };
+      });
       const fc = { type: "FeatureCollection", features };
       const src = map.getSource(OTHERS_SRC);
       if (src) src.setData(fc);
