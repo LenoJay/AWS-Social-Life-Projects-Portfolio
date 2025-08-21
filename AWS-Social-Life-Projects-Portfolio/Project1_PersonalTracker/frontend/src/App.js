@@ -1,7 +1,8 @@
-// src/App.js (CRA, JavaScript)
+// src/App.js
 import React, { useEffect, useMemo, useState } from "react";
 import { Amplify } from "aws-amplify";
 import awsExports from "./aws-exports";
+
 import {
   Authenticator,
   useAuthenticator,
@@ -22,16 +23,14 @@ import {
   setApiBase,
 } from "./api";
 
-// ---------- KEEP YOUR MAP EXACTLY AS BEFORE ----------
-import MapComponent from "./components/MapComponent"; // <-- adjust path if your map file has a different name
-// -----------------------------------------------------
+// Keep your map component unchanged
+import MapComponent from "./components/MapComponent";
 
-// CRA env var; if set, this will override the base at runtime
+// Configure Amplify + API base
+Amplify.configure(awsExports);
 if (process.env.REACT_APP_API_BASE_URL) {
   setApiBase(process.env.REACT_APP_API_BASE_URL);
 }
-
-Amplify.configure(awsExports);
 
 function Header() {
   const { user, signOut } = useAuthenticator((c) => [c.user]);
@@ -71,6 +70,7 @@ function GroupPanel() {
     setStatus("");
     setLoading(true);
     try {
+      // getMyGroup() currently returns null (no backend endpoint).
       const g = await getMyGroup();
       setMyGroup(g || null);
       if (g?.groupId) {
@@ -148,8 +148,12 @@ function GroupPanel() {
           <div>Loading…</div>
         ) : myGroup ? (
           <div>
-            <div><strong>ID:</strong> {myGroup.groupId}</div>
-            <div><strong>Name:</strong> {myGroup.displayName || "—"}</div>
+            <div>
+              <strong>ID:</strong> {myGroup.groupId}
+            </div>
+            <div>
+              <strong>Name:</strong> {myGroup.displayName || "—"}
+            </div>
             <Button marginTop="12px" onClick={refresh}>
               Refresh
             </Button>
@@ -219,13 +223,11 @@ export default function App() {
   return (
     <Authenticator>
       <Header />
-
-      {/* KEEP: your existing map UI exactly as before */}
+      {/* Your existing map UI remains */}
       <div style={{ padding: 16 }}>
         <MapComponent />
       </div>
-
-      {/* Small panel to test your HTTP endpoints */}
+      {/* Simple panel to exercise the HTTP API */}
       <GroupPanel />
     </Authenticator>
   );
