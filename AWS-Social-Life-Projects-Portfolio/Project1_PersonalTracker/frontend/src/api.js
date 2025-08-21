@@ -1,58 +1,69 @@
-import { fetchAuthSession } from "@aws-amplify/auth";
+// src/api.js
+import { Auth } from "aws-amplify";
 
-const BASE = "https://gogr7cxttb.execute-api.eu-central-1.amazonaws.com/dev"; // replace with your API URL
+const RAW_BASE = process.env.REACT_APP_API_BASE_URL || "";
+// normalize: drop trailing slash
+const BASE_URL = RAW_BASE.replace(/\/+$/, "");
 
-async function authFetch(path, opts = {}) {
-  const sess = await fetchAuthSession();
-  const idToken = sess.tokens?.idToken?.toString();
+async function authHeader() {
+  // Grab the Cognito *ID* token (JWT) from the current session
+  const session = await Auth.currentSession();
+  const idToken = session.getIdToken().getJwtToken();
+  return { Authorization: idToken };
+}
+
+async function http(method, path, body) {
   const headers = {
     "Content-Type": "application/json",
-    Authorization: idToken,
-    ...(opts.headers || {}),
+    ...(await authHeader()),
   };
-  const res = await fetch(`${BASE}${path}`, { ...opts, headers });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  const t = await res.text();
-  return t ? JSON.parse(t) : {};
-}
 
-// --- NEW: Create a group ---
-export function createGroup({ displayName }) {
-  return authFetch("/CreateGroup", {
-    method: "POST",
-    body: JSON.stringify({ displayName }),
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
   });
+
+  // Try to parse JSON, but surface useful errors if not
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    const err = new Error(`HTTP ${res.status}`);
+    err.status = res.status;
+    err.payload = data;
+    throw err;
+  }
+  return data;
 }
 
-// --- NEW: Fetch group friendly name ---
-export function getGroup({ groupId }) {
-  return authFetch(`/group?groupId=${encodeURIComponent(groupId)}`);
+/** POST /CreateGroup { displayName } */
+export function createGroup(displayName) {
+  return http("POST", "/CreateGroup", { displayName });
 }
 
-// --- Update location with TTL ---
-export function updateLocation({ groupId, lat, lng, accuracy, status }) {
-  const ttlSeconds = 15 * 60; // 15 minutes
-  const expireAt = Math.floor(Date.now() / 1000) + ttlSeconds;
-
-  return authFetch("/update-location", {
-    method: "POST",
-    body: JSON.stringify({
-      groupId,
-      lat,
-      lng,
-      accuracy,
-      status,
-      expireAt, // pass TTL to backend
-    }),
-  });
+/** POST /JoinGroup { groupId } */
+export function joinGroup(groupId) {
+  return http("POST", "/JoinGroup", { groupId });
 }
 
-// --- Existing ---
-export const getGroupLocations = ({ groupId }) =>
-  authFetch(`/get-group-locations?groupId=${encodeURIComponent(groupId)}`);
+/** GET /GetGroupLocations?groupId=... */
+export function getGroupLocations(groupId) {
+  const qs = groupId ? `?groupId=${encodeURIComponent(groupId)}` : "";
+  return http("GET", `/GetGroupLocations${qs}`);
+}
 
-export const setStatus = (p) =>
-  authFetch("/set-status", { method: "POST", body: JSON.stringify(p) });
+/** POST /SetStatus { status } */
+export function setStatus(status) {
+  return http("POST", "/SetStatus", { status });
+}
 
-export const joinGroup = (p) =>
-  authFetch("/join-group", { method: "POST", body: JSON.stringify(p) });
+/** POST /UpdateLocation { lat, lon } */
+export function updateLocation(lat, lon) {
+  return http("POST", "/UpdateLocation", { lat, lon });
+}
