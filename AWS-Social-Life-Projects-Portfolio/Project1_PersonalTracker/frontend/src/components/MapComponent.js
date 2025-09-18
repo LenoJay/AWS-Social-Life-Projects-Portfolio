@@ -168,7 +168,7 @@ export default function MapComponent() {
     // map size — single definition (remove duplicates)
     map: {
       width: "100%",
-      height: "70dvh",
+      height: "70vh",
       minHeight: 320,
     },
 

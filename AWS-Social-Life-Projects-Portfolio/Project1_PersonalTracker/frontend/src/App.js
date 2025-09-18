@@ -199,7 +199,7 @@ export default function App() {
       <div
   style={{
     padding: 0,
-    height: 'calc(100dvh - 56px)', // 56px ≈ your header height
+    height: 'calc(100vh - 56px)', // 56px ≈ your header height
     minHeight: 320
   }}
 >
