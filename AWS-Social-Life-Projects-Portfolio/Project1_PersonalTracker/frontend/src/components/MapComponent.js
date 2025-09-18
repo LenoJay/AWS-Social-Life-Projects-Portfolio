@@ -91,10 +91,11 @@ export default function MapComponent() {
   const [myStatusText, setMyStatusText] = useState("Available");
   const [toasts, setToasts] = useState([]);
 
-  // ----- Styles -----
+   // ----- Styles -----
   const styles = {
     pageOuter: {
-      minHeight: "100vh",
+      // mobile-friendly full height
+      minHeight: "100dvh",
       width: "100%",
       background:
         "radial-gradient(1200px 600px at 10% -10%, #1b2a4a22 30%, transparent 60%)," +
@@ -113,6 +114,7 @@ export default function MapComponent() {
     titleWrap: { display: "flex", alignItems: "baseline", gap: 12 },
     title: { fontSize: 24, fontWeight: 800, letterSpacing: 0.2 },
     titleSub: { fontSize: 14, opacity: 0.9 },
+
     // unified button base
     btnBase: {
       padding: "8px 12px",
@@ -123,12 +125,14 @@ export default function MapComponent() {
       color: "#ffffff",
       boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
     },
+
     // colors
     btnBlue:   { background: "#3b82f6" }, // Create (lighter blue)
     btnBlueDk: { background: "#1e40af" }, // Join / Invite (darker blue)
-    btnGreen:  { background: "#10b981" }, // Start tracking (green)
-    btnRed:    { background: "#ef4444" }, // Stop tracking (red)
+    btnGreen:  { background: "#10b981" }, // Start tracking
+    btnRed:    { background: "#ef4444" }, // Stop tracking
     btnSlate:  { background: "#64748b" },
+
     topBar: {
       display: "flex",
       flexWrap: "wrap",
@@ -160,7 +164,14 @@ export default function MapComponent() {
       border: "1px solid #1f2937",
       boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
     },
-    map: { width: "100%", height: "680px" }, // taller map
+
+    // map size — single definition (remove duplicates)
+    map: {
+      width: "100%",
+      height: "70dvh",
+      minHeight: 320,
+    },
+
     footerBar: {
       display: "flex",
       gap: 10,
@@ -170,6 +181,8 @@ export default function MapComponent() {
       background: "#0b1220",
     },
     spacer: { flex: 1 },
+
+    // toasts
     toastWrap: {
       position: "fixed",
       bottom: 20,
@@ -190,6 +203,7 @@ export default function MapComponent() {
       maxWidth: 360,
     },
   };
+
 
   // ----- Signed-in user (kept for future, not shown in header now) -----
   useEffect(() => {
@@ -492,6 +506,27 @@ export default function MapComponent() {
     setToasts((prev) => [...prev, t]);
     setTimeout(() => { setToasts((prev) => prev.filter((x) => x.id !== t.id)); }, 3200);
   };
+
+  // --- MOBILE RESIZE FIX (paste this exactly one line above `return (`) ---
+useEffect(() => {
+  const handleResize = () => {
+    if (mapRef.current) {
+      try { mapRef.current.resize(); } catch {}
+    }
+  };
+  // Call once shortly after mount to catch initial 0-height cases
+  const t = setTimeout(handleResize, 300);
+  window.addEventListener('resize', handleResize);
+  window.addEventListener('orientationchange', handleResize);
+  document.addEventListener('visibilitychange', handleResize);
+  return () => {
+    clearTimeout(t);
+    window.removeEventListener('resize', handleResize);
+    window.removeEventListener('orientationchange', handleResize);
+    document.removeEventListener('visibilitychange', handleResize);
+  };
+}, []);
+// --- END MOBILE RESIZE FIX ---
 
   return (
     <div style={styles.pageOuter}>

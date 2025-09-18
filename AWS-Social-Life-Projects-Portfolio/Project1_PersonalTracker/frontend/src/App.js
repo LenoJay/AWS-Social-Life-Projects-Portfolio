@@ -191,19 +191,26 @@ function AlertsTray({ alerts, onDismiss }) {
 // ---------- App ----------
 export default function App() {
   return (
-    <Authenticator>
+    <Authenticator
+      loginMechanisms={['username']}
+      signUpAttributes={['email']}
+    >
       <Header />
+      <div
+  style={{
+    padding: 0,
+    height: 'calc(100dvh - 56px)', // 56px ≈ your header height
+    minHeight: 320
+  }}
+>
+  <MapComponent />
+</div>
 
-      {/* Main map UI (unchanged) */}
-      <div style={{ padding: 16 }}>
-        <MapComponent />
-      </div>
-
-      {/* Geofence alerts tray (connects only if REACT_APP_WS_URL is set) */}
       <GeofenceAlertsMount />
     </Authenticator>
   );
 }
+
 
 // Separate component so we can access the signed-in user
 function GeofenceAlertsMount() {
