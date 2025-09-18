@@ -1,5 +1,5 @@
 // src/App.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Amplify } from "aws-amplify";
 import awsExports from "./aws-exports";
 
@@ -9,29 +9,21 @@ import {
   Button,
   Flex,
   Heading,
-  TextField,
-  View,
   Card,
+  Badge,
 } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
 
-import {
-  createGroup,
-  joinGroup,
-  getMyGroup,
-  getGroupLocations,
-  setApiBase,
-} from "./api";
-
-// Keep your map component unchanged
+import { setApiBase } from "./api"; // only used to set base URL once
 import MapComponent from "./components/MapComponent";
 
-// Configure Amplify + API base
+// ---------- Amplify + API base ----------
 Amplify.configure(awsExports);
 if (process.env.REACT_APP_API_BASE_URL) {
   setApiBase(process.env.REACT_APP_API_BASE_URL);
 }
 
+// ---------- Header ----------
 function Header() {
   const { user, signOut } = useAuthenticator((c) => [c.user]);
   return (
@@ -58,177 +50,166 @@ function Header() {
   );
 }
 
-function GroupPanel() {
-  const [loading, setLoading] = useState(false);
-  const [myGroup, setMyGroup] = useState(null);
-  const [createName, setCreateName] = useState("");
-  const [joinCode, setJoinCode] = useState("");
-  const [status, setStatus] = useState("");
-  const [locations, setLocations] = useState([]);
+// ---------- Geofence alerts (optional, via WebSocket) ----------
+function useGeofenceSocket(user) {
+  const [alerts, setAlerts] = useState([]);
+  const wsRef = useRef(null);
+  const url = process.env.REACT_APP_WS_URL; // e.g. wss://xxxx.execute-api.eu-central-1.amazonaws.com/dev
 
-  async function refresh() {
-    setStatus("");
-    setLoading(true);
-    try {
-      // getMyGroup() currently returns null (no backend endpoint).
-      const g = await getMyGroup();
-      setMyGroup(g || null);
-      if (g?.groupId) {
-        const loc = await getGroupLocations(g.groupId);
-        setLocations(Array.isArray(loc) ? loc : []);
-      } else {
-        setLocations([]);
+  // Helper: normalize incoming payloads
+  function parseEvent(data) {
+    // Accept either string or object
+    let obj = data;
+    if (typeof data === "string") {
+      try {
+        obj = JSON.parse(data);
+      } catch {
+        return null;
       }
-    } catch (e) {
-      setStatus(String(e.message || e));
-    } finally {
-      setLoading(false);
     }
+    // Expected keys: type ENTER|EXIT, fenceId, userId, at
+    const type = String(obj.type || obj.event || "").toUpperCase();
+    if (!["ENTER", "EXIT"].includes(type)) return null;
+    return {
+      type,
+      fenceId: obj.fenceId || obj.geofenceId || "unknown-area",
+      userId: obj.userId || obj.subject || user?.username || "unknown-user",
+      at: obj.at || obj.timestamp || new Date().toISOString(),
+    };
   }
 
   useEffect(() => {
-    refresh();
-  }, []);
+    if (!url) return;
 
-  async function onCreate() {
-    if (!createName.trim()) {
-      setStatus("Please enter a display name for the group.");
-      return;
-    }
-    setLoading(true);
-    setStatus("");
-    try {
-      const created = await createGroup(createName.trim());
-      setMyGroup(created);
-      setCreateName("");
-      setStatus(`Created group ${created?.groupId || ""}`);
-      if (created?.groupId) {
-        const loc = await getGroupLocations(created.groupId);
-        setLocations(Array.isArray(loc) ? loc : []);
-      }
-    } catch (e) {
-      setStatus(String(e.message || e));
-    } finally {
-      setLoading(false);
-    }
-  }
+    // If your WS needs a token in querystring, you could append it here.
+    // Browsers can't set custom WS headers, so query param is typical:
+    // const token = await fetchAuthSession()...; // if you later add it
+    const qsUser = encodeURIComponent(user?.username || "anon");
+    const wsUrl = url.includes("?") ? `${url}&u=${qsUser}` : `${url}?u=${qsUser}`;
 
-  async function onJoin() {
-    if (!joinCode.trim()) {
-      setStatus("Enter a group code to join.");
-      return;
-    }
-    setLoading(true);
-    setStatus("");
-    try {
-      const joined = await joinGroup(joinCode.trim());
-      setMyGroup(joined);
-      setJoinCode("");
-      setStatus(`Joined group ${joined?.groupId || ""}`);
-      if (joined?.groupId) {
-        const loc = await getGroupLocations(joined.groupId);
-        setLocations(Array.isArray(loc) ? loc : []);
-      }
-    } catch (e) {
-      setStatus(String(e.message || e));
-    } finally {
-      setLoading(false);
-    }
-  }
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
 
-  const groupId = useMemo(() => myGroup?.groupId || "", [myGroup]);
+    ws.onopen = () => {
+      // Optional hello
+      try {
+        ws.send(JSON.stringify({ op: "hello", user: user?.username || "anon" }));
+      } catch {}
+    };
+
+    ws.onmessage = (e) => {
+      const evt = parseEvent(e.data);
+      if (!evt) return;
+      setAlerts((prev) => {
+        const next = [{ id: crypto.randomUUID(), ...evt }, ...prev];
+        return next.slice(0, 6); // keep last 6
+      });
+    };
+
+    ws.onerror = () => {
+      // Silent; we don't want to nag in UI if WS is not configured
+    };
+    ws.onclose = () => {};
+
+    return () => {
+      try {
+        ws.close(1000);
+      } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, user?.username]);
+
+  const dismiss = (id) => {
+    setAlerts((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  return { alerts, dismiss };
+}
+
+function AlertsTray({ alerts, onDismiss }) {
+  if (!alerts || alerts.length === 0) return null;
 
   return (
-    <View padding="16px" maxWidth="1000px" margin="0 auto">
-      <Card variation="outlined" padding="16px" marginBottom="16px">
-        <Heading level={4} marginBottom="8px">
-          Your Group
-        </Heading>
-        {loading ? (
-          <div>Loading…</div>
-        ) : myGroup ? (
-          <div>
-            <div>
-              <strong>ID:</strong> {myGroup.groupId}
-            </div>
-            <div>
-              <strong>Name:</strong> {myGroup.displayName || "—"}
-            </div>
-            <Button marginTop="12px" onClick={refresh}>
-              Refresh
-            </Button>
-          </div>
-        ) : (
-          <div>No group yet.</div>
-        )}
-      </Card>
-
-      <Flex gap="16px" wrap="wrap">
-        <Card variation="outlined" padding="16px" style={{ flex: "1 1 280px" }}>
-          <Heading level={5} marginBottom="8px">
-            Create a new group
-          </Heading>
-          <TextField
-            label="Display name"
-            labelHidden
-            placeholder="e.g. Family"
-            value={createName}
-            onChange={(e) => setCreateName(e.target.value)}
-          />
-          <Button marginTop="12px" onClick={onCreate} isDisabled={loading}>
-            Create
-          </Button>
-        </Card>
-
-        <Card variation="outlined" padding="16px" style={{ flex: "1 1 280px" }}>
-          <Heading level={5} marginBottom="8px">
-            Join an existing group
-          </Heading>
-          <TextField
-            label="Group code"
-            labelHidden
-            placeholder="6-char code"
-            value={joinCode}
-            onChange={(e) => setJoinCode(e.target.value)}
-          />
-          <Button marginTop="12px" onClick={onJoin} isDisabled={loading}>
-            Join
-          </Button>
-        </Card>
-      </Flex>
-
-      <Card variation="outlined" padding="16px" marginTop="16px">
-        <Heading level={5} marginBottom="8px">
-          Recent locations {groupId ? `(group ${groupId})` : ""}
-        </Heading>
-        {locations.length === 0 ? (
-          <div>No locations yet.</div>
-        ) : (
-          <pre style={{ whiteSpace: "pre-wrap" }}>
-            {JSON.stringify(locations, null, 2)}
-          </pre>
-        )}
-      </Card>
-
-      {status ? (
-        <Card variation="outlined" marginTop="16px" padding="12px">
-          {status}
-        </Card>
-      ) : null}
-    </View>
+    <div
+      style={{
+        position: "fixed",
+        right: 16,
+        bottom: 16,
+        width: 360,
+        maxWidth: "calc(100vw - 32px)",
+        zIndex: 50,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {alerts.map((a) => {
+        const isEnter = a.type === "ENTER";
+        const chipColor = isEnter ? "green" : "red";
+        return (
+          <Card
+            key={a.id}
+            variation="outlined"
+            style={{
+              boxShadow: "0 10px 25px rgba(0,0,0,0.25)",
+              background: "#0b1220",
+              color: "white",
+            }}
+          >
+            <Flex direction="column" gap="6px">
+              <Flex alignItems="center" gap="10px" justifyContent="space-between">
+                <Flex alignItems="center" gap="8px">
+                  <Badge
+                    size="small"
+                    variation="success"
+                    style={{
+                      backgroundColor: chipColor === "green" ? "#16a34a" : "#b91c1c",
+                      color: "white",
+                    }}
+                  >
+                    {isEnter ? "ENTER" : "EXIT"}
+                  </Badge>
+                  <strong>{a.fenceId}</strong>
+                </Flex>
+                <Button size="small" onClick={() => onDismiss(a.id)}>
+                  Dismiss
+                </Button>
+              </Flex>
+              <div style={{ opacity: 0.9 }}>
+                User <strong>{a.userId}</strong> {isEnter ? "entered" : "exited"}{" "}
+                <em>{a.fenceId}</em>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>{a.at}</div>
+            </Flex>
+          </Card>
+        );
+      })}
+    </div>
   );
 }
 
+// ---------- App ----------
 export default function App() {
   return (
     <Authenticator>
       <Header />
-      {/* Your existing map UI remains */}
+
+      {/* Main map UI (unchanged) */}
       <div style={{ padding: 16 }}>
         <MapComponent />
       </div>
-      {/* Simple panel to exercise the HTTP API */}
-      <GroupPanel />
+
+      {/* Geofence alerts tray (connects only if REACT_APP_WS_URL is set) */}
+      <GeofenceAlertsMount />
     </Authenticator>
   );
+}
+
+// Separate component so we can access the signed-in user
+function GeofenceAlertsMount() {
+  const { user } = useAuthenticator((c) => [c.user]);
+  const { alerts, dismiss } = useGeofenceSocket(user);
+
+  // Render tray near the root so it's above the map controls
+  return <AlertsTray alerts={alerts} onDismiss={dismiss} />;
 }
