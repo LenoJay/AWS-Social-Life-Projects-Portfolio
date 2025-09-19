@@ -30,3 +30,9 @@ button {
 /* Optional: soften default anchor colours on dark bg */
 a { color: #93c5fd; }
 a:hover { color: #bfdbfe; }
+/* Ensure MapLibre canvas fills its container on mobile */
+#pt-map,
+.maplibregl-map {
+  width: 100% !important;
+  height: 100% !important;
+}

@@ -190,25 +190,43 @@ function AlertsTray({ alerts, onDismiss }) {
 
 // ---------- App ----------
 export default function App() {
-  return (
-    <Authenticator
-      loginMechanisms={['username']}
-      signUpAttributes={['email']}
-    >
-      <Header />
-      <div
-  style={{
-    padding: 0,
-    height: 'calc(100vh - 56px)', // 56px ≈ your header height
-    minHeight: 320
-  }}
->
-  <MapComponent />
-</div>
+  // --- MOBILE MAP HEIGHT WRAPPER (inside App, just above return) ---
+const mapShellRef = useRef(null);
 
-      <GeofenceAlertsMount />
+useEffect(() => {
+  const headerGuess = 56; // px; tweak if your header is taller/shorter
+  const setH = () => {
+    if (!mapShellRef.current) return;
+    const h = Math.max(320, (window.innerHeight || 0) - headerGuess);
+    mapShellRef.current.style.height = `${h}px`;
+  };
+  setH();
+  const t = setTimeout(setH, 300); // after mobile UI chrome settles
+  window.addEventListener('resize', setH);
+  window.addEventListener('orientationchange', setH);
+  document.addEventListener('visibilitychange', setH);
+  return () => {
+    clearTimeout(t);
+    window.removeEventListener('resize', setH);
+    window.removeEventListener('orientationchange', setH);
+    document.removeEventListener('visibilitychange', setH);
+  };
+}, []);
+// --- END WRAPPER ---
+
+return (
+  <div style={{ height: '100%', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <Authenticator loginMechanisms={['username']} signUpAttributes={['email']}>
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Header />
+        <div ref={mapShellRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+          <MapComponent />
+        </div>
+        <GeofenceAlertsMount />
+      </div>
     </Authenticator>
-  );
+  </div>
+);
 }
 
 
