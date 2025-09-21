@@ -1,7 +1,24 @@
 import React, { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
-import { createMap } from "maplibre-gl-js-amplify";
+import { AmplifyMapLibreRequest } from "maplibre-gl-js-amplify";
+import { Amplify } from "aws-amplify";
+import awsExports from "../aws-exports";
 import * as turf from "@turf/turf";
+import "maplibre-gl/dist/maplibre-gl.css";
+
+// Initialize the map with direct maplibre-gl
+const initializeMap = (container) => {
+  return new maplibregl.Map({
+    container: container,
+    style: `https://maps.geo.${awsExports.geo.amazon_location_service.region}.amazonaws.com/maps/v0/maps/${awsExports.geo.amazon_location_service.maps.default}/style-descriptor`,
+    center: DEFAULT_CENTER,
+    zoom: DEFAULT_ZOOM,
+    attributionControl: false
+  });
+};
+
+// Remove this line as we're using the direct maplibre-gl CSS instead
+// import "@aws-amplify/maplibre-gl-js-amplify/dist/public/amplify-maplibre-gl.css";
 import {
   createGroup,
   getGroup,
@@ -10,8 +27,16 @@ import {
   getGroupLocations,
   setStatus,
 } from "../api";
-import { getCurrentUser } from "@aws-amplify/auth";
 
+// Ensure the same Amplify instance that this module uses is configured.
+try { Amplify.configure(awsExports); } catch {}
+
+// Read map config explicitly (fallback to your known names)
+const MAP_REGION =
+  awsExports?.geo?.amazon_location_service?.region || "eu-central-1";
+const MAP_NAME =
+  awsExports?.geo?.amazon_location_service?.maps?.default || "PersonalTrackerMap-dev";
+const IDENTITY_POOL_ID = awsExports?.aws_cognito_identity_pool_id;
 // ----- Constants -----
 const WS_URL = ""; // optional WebSocket endpoint, leave blank to disable
 const DEFAULT_CENTER = [-0.1276, 51.5074]; // London [lng, lat]
@@ -208,124 +233,157 @@ export default function MapComponent() {
     async function initializeMap() {
       if (mapRef.current) return;
 
-      const map = await createMap({
-        container: mapDivRef.current,
-        center: DEFAULT_CENTER,
-        zoom: DEFAULT_ZOOM
-      });
+      try {
+        console.log('Map initialization starting...', {
+          container: mapDivRef.current,
+          region: MAP_REGION,
+          mapName: MAP_NAME
+        });
+        
+// Sign Amazon Location requests via Cognito Identity Pool
+const request = new AmplifyMapLibreRequest({
+  region: MAP_REGION,
+  identityPoolId: IDENTITY_POOL_ID,
+});
+const transformRequest = (url, resourceType) =>
+  request.transformRequest(url, resourceType);
 
-      if (cancelled) return;
-      mapRef.current = map;
+// Amazon Location style descriptor URL for your map
+const style = `https://maps.geo.${MAP_REGION}.amazonaws.com/maps/v0/maps/${encodeURIComponent(
+  MAP_NAME
+)}/style-descriptor`;
 
-      map.on("load", () => {
-        // Initialize sources and layers
-        if (!map.getSource(TRAIL_SRC)) {
-          map.addSource(TRAIL_SRC, {
-            type: "geojson",
-            data: turf.featureCollection([])
-          });
+// Create MapLibre map directly (no createMap, no Geo-provider lookup)
+const map = new maplibregl.Map({
+  container: mapDivRef.current,
+  style,
+  center: DEFAULT_CENTER,
+  zoom: DEFAULT_ZOOM,
+  transformRequest,
+});
+
+console.log("Map created successfully");
+mapRef.current = map;
+
+
+        map.on("load", () => {
+          // Initialize sources and layers
+          if (!map.getSource(TRAIL_SRC)) {
+            map.addSource(TRAIL_SRC, {
+              type: "geojson",
+              data: turf.featureCollection([])
+            });
+          }
+          if (!map.getLayer(TRAIL_LAYER)) {
+            map.addLayer({
+              id: TRAIL_LAYER,
+              type: "line",
+              source: TRAIL_SRC,
+              paint: {
+                "line-color": "#3b82f6",
+                "line-width": 3
+              }
+            });
+          }
+
+          // Add Others (clustered)
+          if (!map.getSource(OTHERS_SRC)) {
+            map.addSource(OTHERS_SRC, {
+              type: "geojson",
+              data: turf.featureCollection([]),
+              cluster: true,
+              clusterRadius: 40
+            });
+          }
+
+          if (!map.getLayer(OTHERS_LAYER_CLUSTER)) {
+            map.addLayer({
+              id: OTHERS_LAYER_CLUSTER,
+              type: "circle",
+              source: OTHERS_SRC,
+              filter: ["has", "point_count"],
+              paint: {
+                "circle-color": "#1e40af",
+                "circle-radius": ["step", ["get", "point_count"], 20, 100, 30, 750, 40],
+                "circle-opacity": 0.75,
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+          }
+
+          if (!map.getLayer(OTHERS_LAYER_COUNT)) {
+            map.addLayer({
+              id: OTHERS_LAYER_COUNT,
+              type: "symbol",
+              source: OTHERS_SRC,
+              filter: ["has", "point_count"],
+              layout: {
+                "text-field": "{point_count_abbreviated}",
+                "text-font": ["Arial Unicode MS Bold"],
+                "text-size": 16,
+              },
+              paint: {
+                "text-color": "#ffffff",
+              },
+            });
+          }
+
+          if (!map.getLayer(OTHERS_LAYER_UNCLUSTERED)) {
+            map.addLayer({
+              id: OTHERS_LAYER_UNCLUSTERED,
+              type: "circle",
+              source: OTHERS_SRC,
+              filter: ["!", ["has", "point_count"]],
+              paint: {
+                "circle-color": ["get", "color"],
+                "circle-radius": 8,
+                "circle-opacity": 0.75,
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+          }
+
+          if (!map.getLayer(OTHERS_LAYER_LABELS)) {
+            map.addLayer({
+              id: OTHERS_LAYER_LABELS,
+              type: "symbol",
+              source: OTHERS_SRC,
+              filter: ["!", ["has", "point_count"]],
+              layout: {
+                "text-field": ["get", "username"],
+                "text-font": ["Arial Unicode MS Bold"],
+                "text-size": 12,
+                "text-offset": [0, 1.5],
+                "text-anchor": "top",
+              },
+              paint: {
+                "text-color": "#ffffff",
+                "text-halo-color": "#000000",
+                "text-halo-width": 1,
+              },
+            });
+          }
+
+          // Force initial resize for mobile
+          setTimeout(() => {
+            map.resize();
+            // Second resize after a delay to catch any layout shifts
+            setTimeout(() => map.resize(), 500);
+          }, 0);
+        });
+
+      } catch (error) {
+        console.error('Map initialization failed:', error);
+        if (mapDivRef.current) {
+          mapDivRef.current.innerHTML = `
+            <div style="padding: 20px; color: #ef4444; text-align: center;">
+              Map failed to load: ${error.message}
+            </div>
+          `;
         }
-        if (!map.getLayer(TRAIL_LAYER)) {
-          map.addLayer({
-            id: TRAIL_LAYER,
-            type: "line",
-            source: TRAIL_SRC,
-            paint: {
-              "line-color": "#3b82f6",
-              "line-width": 3
-            }
-          });
-        }
-
-        // Others (clustered)
-        if (!map.getSource(OTHERS_SRC)) {
-          map.addSource(OTHERS_SRC, {
-            type: "geojson",
-            data: turf.featureCollection([]),
-            cluster: true,
-            clusterRadius: 40
-          });
-        }
-
-        if (!map.getLayer(OTHERS_LAYER_CLUSTER)) {
-          map.addLayer({
-            id: OTHERS_LAYER_CLUSTER,
-            type: "circle",
-            source: OTHERS_SRC,
-            filter: ["has", "point_count"],
-            paint: {
-              "circle-color": "#1e40af",
-              "circle-radius": ["step", ["get", "point_count"], 20, 100, 30, 750, 40],
-              "circle-opacity": 0.75,
-              "circle-stroke-width": 2,
-              "circle-stroke-color": "#ffffff",
-            },
-          });
-        }
-
-        if (!map.getLayer(OTHERS_LAYER_COUNT)) {
-          map.addLayer({
-            id: OTHERS_LAYER_COUNT,
-            type: "symbol",
-            source: OTHERS_SRC,
-            filter: ["has", "point_count"],
-            layout: {
-              "text-field": "{point_count_abbreviated}",
-              "text-font": ["Arial Unicode MS Bold"],
-              "text-size": 16,
-            },
-            paint: {
-              "text-color": "#ffffff",
-            },
-          });
-        }
-
-        if (!map.getLayer(OTHERS_LAYER_UNCLUSTERED)) {
-          map.addLayer({
-            id: OTHERS_LAYER_UNCLUSTERED,
-            type: "circle",
-            source: OTHERS_SRC,
-            filter: ["!", ["has", "point_count"]],
-            paint: {
-              "circle-color": ["get", "color"],
-              "circle-radius": 8,
-              "circle-opacity": 0.75,
-              "circle-stroke-width": 2,
-              "circle-stroke-color": "#ffffff",
-            },
-          });
-        }
-
-        if (!map.getLayer(OTHERS_LAYER_LABELS)) {
-          map.addLayer({
-            id: OTHERS_LAYER_LABELS,
-            type: "symbol",
-            source: OTHERS_SRC,
-            filter: ["!", ["has", "point_count"]],
-            layout: {
-              "text-field": ["get", "username"],
-              "text-font": ["Arial Unicode MS Bold"],
-              "text-size": 12,
-              "text-offset": [0, 1.5],
-              "text-anchor": "top",
-            },
-            paint: {
-              "text-color": "#ffffff",
-              "text-halo-color": "#000000",
-              "text-halo-width": 1,
-            },
-          });
-        }
-
-        // Set cursor styles
-        const canvas = map.getCanvas();
-        canvas.style.cursor = "grab";
-        map.on("dragstart", () => (canvas.style.cursor = "grabbing"));
-        map.on("dragend", () => (canvas.style.cursor = "grab"));
-
-        // Force initial resize
-        setTimeout(() => map.resize(), 0);
-      });
+      }
     }
 
     initializeMap();
@@ -379,6 +437,35 @@ export default function MapComponent() {
         map.remove();
         mapRef.current = null;
       }
+    };
+  }, []);
+
+  // Add this useEffect after your main map initialization useEffect
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && mapRef.current) {
+        setTimeout(() => {
+          mapRef.current.resize();
+        }, 0);
+      }
+    };
+
+    const handleOrientationChange = () => {
+      if (mapRef.current) {
+        setTimeout(() => {
+          mapRef.current.resize();
+          // Second resize after animation
+          setTimeout(() => mapRef.current.resize(), 500);
+        }, 0);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('orientationchange', handleOrientationChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('orientationchange', handleOrientationChange);
     };
   }, []);
 
@@ -536,127 +623,102 @@ export default function MapComponent() {
       });
       const fc = { type: "FeatureCollection", features };
       const src = map.getSource(OTHERS_SRC);
-      if (src) src.setData(fc);
+      if (src) {
+        src.setData(fc);
+      }
     } catch (e) {
-      console.warn("getGroupLocations failed", e);
-    }
-  };
-
-  // ----- Status -----
-  const sendStatus = async (txt) => {
-    setMyStatusText(txt);
-    try {
-      await setStatus({ groupId, status: txt });
-      showToast(`Status set: ${txt}`);
-    } catch (e) {
-      console.warn("setStatus failed", e);
+      console.error("Error refreshing group locations:", e);
     }
   };
 
   // ----- Toasts -----
-  const showToast = (text) => {
-    const t = { id: Date.now() + Math.random(), text };
-    setToasts((prev) => [...prev, t]);
+  const showToast = (text, duration = 3000) => {
+    const id = Date.now();
+    setToasts((t) => [...t, { id, text }]);
+
     setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== t.id));
-    }, 3200);
+      setToasts((t) => t.filter((toast) => toast.id !== id));
+    }, duration);
+  };
+
+  // ----- Status -----
+  const updateStatus = async (newStatus) => {
+    setMyStatusText(newStatus);
+    try {
+      await setStatus({ status: newStatus });
+      showToast(`Status set to "${newStatus}"`);
+    } catch (e) {
+      console.error("Error updating status:", e);
+    }
   };
 
   return (
     <div style={styles.pageOuter}>
-      {/* Header controls */}
-      <div style={{ padding: '18px 18px 0 18px' }}>
-        <div style={styles.headerRow}>
-          <div style={styles.titleWrap}>
-            <div style={styles.title}>Personal Tracker</div>
-            <div style={styles.titleSub}>{username}</div>
+      {/* Header / title bar */}
+      <div style={styles.headerRow}>
+        <div style={styles.titleWrap}>
+          <div style={styles.title}>Personal Tracker</div>
+          <div style={styles.titleSub}>Live location sharing</div>
+        </div>
+        <div style={styles.topBar}>
+          {/* Group ID / name display */}
+          {groupId ? (
+            <div style={styles.btnBase}>
+              <strong>{groupName || groupId}</strong>
+              <div style={{ fontSize: 12, opacity: 0.8 }}>{groupId}</div>
+            </div>
+          ) : (
+            <div style={styles.btnBase}>
+              <em>Not in a group</em>
+            </div>
+          )}
+
+          {/* Re-center buttons */}
+          <div
+            style={{ ...styles.btnBase, ...styles.btnSlate }}
+            onClick={recenterSelf}
+          >
+            My Location
+          </div>
+          <div
+            style={{ ...styles.btnBase, ...styles.btnSlate }}
+            onClick={recenterLondon}
+          >
+            Reset View
           </div>
         </div>
-  
-        {/* Group controls */}
-        <div style={styles.topBar}>
-          <input
-            placeholder="Group name"
-            value={groupName}
-            onChange={(e) => setGroupName(e.target.value)}
-            style={styles.input}
-          />
-          <button style={{ ...styles.btnBase, ...styles.btnBlue }} onClick={handleCreateGroup}>
-            Create
-          </button>
-  
-          <input
-            placeholder="Group ID"
-            value={groupId}
-            onChange={(e) => setGroupId(e.target.value.trim())}
-            style={styles.input}
-          />
-          <button style={{ ...styles.btnBase, ...styles.btnBlueDk }} onClick={handleJoinGroup}>
-            Join group
-          </button>
-          <button
-            style={{ ...styles.btnBase, ...styles.btnBlueDk }}
-            onClick={async () => {
-              if (!groupId) return;
-              await navigator.clipboard.writeText(groupId);
-              showToast("Group code copied");
-            }}
-          >
-            Invite (copy code)
-          </button>
-  
-          {!isTracking ? (
-            <button style={{ ...styles.btnBase, ...styles.btnGreen }} onClick={startTracking}>
-              Start tracking
-            </button>
-          ) : (
-            <button style={{ ...styles.btnBase, ...styles.btnRed }} onClick={stopTracking}>
-              Stop tracking
-            </button>
-          )}
-        </div>
-  
-        {/* Status buttons */}
+      </div>
+
+      {/* Map container */}
+      <div
+        ref={mapDivRef}
+        style={styles.map}
+        className="maplibregl-map"
+      />
+
+      {/* Footer bar (status, tracking, etc.) */}
+      <div style={styles.footerBar}>
+        {/* Status selector (stand-alone statuses) */}
         <div style={styles.statusBar}>
-          {STATUSES.map((s) => (
-            <button
-              key={s.label}
-              style={{ ...styles.btnBase, background: s.color }}
-              onClick={() => sendStatus(s.label)}
+          {STATUSES.map((s, i) => (
+            <div
+              key={i}
+              onClick={() => updateStatus(s.label)}
+              style={{
+                ...styles.btnBase,
+                ...(myStatusText === s.label ? styles.btnGreen : { background: s.color }),
+                opacity: myStatusText === s.label ? 1 : 0.9,
+                transition: "opacity 0.2s",
+              }}
             >
               {s.label}
-            </button>
+            </div>
           ))}
-          <div style={{ marginLeft: 8, fontWeight: 600, color: "#cbd5e1" }}>
-            Current: {myStatusText}
-          </div>
         </div>
-      </div>
-  
-      {/* Map container */}
-      <div style={{ flex: 1, position: 'relative', minHeight: 0, margin: '18px' }}>
-        <div style={styles.card}>
-          <div id="pt-map" ref={mapDivRef} style={{ ...styles.map, height: '100%' }} />
-          <div style={styles.footerBar}>
-            <div style={styles.spacer} />
-            <button style={{ ...styles.btnBase, ...styles.btnSlate }} onClick={recenterSelf}>
-              Re-center me
-            </button>
-            <button style={{ ...styles.btnBase, ...styles.btnSlate }} onClick={recenterLondon}>
-              Re-center London
-            </button>
-          </div>
-        </div>
-      </div>
-  
-      {/* Toasts */}
-      <div style={styles.toastWrap}>
-        {toasts.map((t) => (
-          <div key={t.id} style={styles.toast}>
-            {t.text}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+
+        {/* Group controls (create/join) */}
+        <div style={styles.spacer} />
+        <div style={styles.topBar}>
+          <input
+            value={groupId}
+   
