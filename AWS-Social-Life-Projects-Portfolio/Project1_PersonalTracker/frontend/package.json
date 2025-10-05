@@ -3,20 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "@aws-amplify/auth": "^6.15.0",
-    "@aws-amplify/ui-react": "5.3.1",
-    "@aws-sdk/client-location": "3.67.0",
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.6.4",
-    "@testing-library/react": "^16.3.0",
+    "@aws-amplify/ui-react": "^6.13.0",
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
-    "@turf/turf": "6.5.0",
-    "amazon-location-helpers": "^1.1.1",
-    "aws-amplify": "5.3.11",
-    "maplibre-gl": "2.4.0",
-    "maplibre-gl-js-amplify": "^3.1.0",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
+    "@turf/turf": "^6.5.0",
+    "aws-amplify": "^6.15.7",
+    "maplibre-gl": "^2.4.0",
+    "maplibre-gl-js-amplify": "^4.0.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
@@ -42,8 +39,5 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  },
-  "devDependencies": {
-    "react-scripts": "^5.0.1"
   }
 }
